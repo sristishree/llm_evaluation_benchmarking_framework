@@ -156,6 +156,10 @@ Use Pydantic subclasses per task type so `expected` is properly typed: `str` for
 
 Most benchmarks fail because tasks are too easy — every provider scores 85–95% and results are flat. Deliberately include tasks that stress-test models: long inputs, domain jargon, adversarial phrasing, unanswerable questions, implicit sentiment. **Score spread is what makes the analysis worth reading.**
 
+### Storage Format
+
+Task bank files are stored as **JSONL** (one task per line) — supports streaming reads, easy appending, and line-level validation without loading the full file into memory.
+
 ### Versioning
 
 Treat the task bank as a versioned dataset. Use semantic versioning (`v1.0`, `v1.1`) with a `CHANGELOG.md`. This makes results reproducible across time and signals MLOps thinking.
@@ -185,7 +189,6 @@ Treat the task bank as a versioned dataset. Use semantic versioning (`v1.0`, `v1
 
 ### Statistical Rigour
 - Define metrics before running — post-hoc metric selection is p-hacking
-- A 2% accuracy delta without a significance test is not a finding *(open to discussion)*
 - Include bootstrap confidence intervals on score differences between providers
 
 ---
@@ -228,4 +231,12 @@ Treat the task bank as a versioned dataset. Use semantic versioning (`v1.0`, `v1
 - [ ] **Dataset auto-update agent** — An agent that periodically updates/refreshes the task bank datasets?
 - [ ] **RAG over results** — Save all reports to a DB and use an LLM to answer analysis questions in Q&A format. (Future project idea.)
 - [ ] **BYOK (Bring Your Own Key)** — Explore integration for multi-user or demo scenarios.
-- [ ] **2% delta significance threshold** — Is this the right threshold? What's the right statistical test?
+- [ ] **Multi-domain task tagging** — `infer_domain` currently returns the first keyword match and stops. Documents covering multiple topics (e.g. political corruption spanning politics + crime) get a single label. Consider returning `list[str]` for `domain` or storing secondary matches in `metadata` for richer filtering and stratified sampling.
+- [ ] **Global hosting & public leaderboard** — Host the dashboard globally (Railway, Render, or HF Spaces) rather than locally. A hosted URL on a resume/LinkedIn is far more effective than a repo that requires local setup. Cloud providers (Claude, GPT-4o, Gemini) work out of the box; Ollama users would need to run locally or expose via a tunnel — document this clearly rather than trying to solve it.
+  - **Opt-in result sharing:** when a user runs a benchmark, let them opt in to making results public. Store model name, provider, task type, difficulty, scores per metric, timestamp, and whether the default or custom task bank was used — no API keys, no PII. Add a disclaimer: *"Results are user-submitted and not independently verified."*
+  - **Leaderboard aggregation:** top-level view shows aggregate scores per model (e.g. "GPT-4o: avg summarization ROUGE-L 0.42 across 34 runs") with individual runs drillable. Filter by task type, difficulty tier, domain, and date range.
+  - **Custom vs default task bank results:** tag results so default-bank runs remain comparable across users; custom-bank runs are shown separately or filterable.
+- [ ] **User-provided task bank (custom mode)** — Two modes: *default* (curated task bank, comparable results, feeds public leaderboard) and *custom* (user uploads their own tasks in JSONL/JSON/YAML, validated against the Pydantic task schema on upload with immediate error feedback). Key UX considerations:
+  - Let users set difficulty per task or leave blank — infer it via a quick LLM call.
+  - Let users mix default + custom tasks in a single run to benchmark their data relative to the standard set.
+  - Custom results on the public leaderboard are tagged and filterable so they don't pollute default benchmark comparisons.
