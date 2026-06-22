@@ -5,3 +5,9 @@ nltk>=3.8
 textstat>=0.7
 matplotlib==3.10.9
 dotenv
+
+# Phase 2 — Prompt Runner
+litellm>=1.40.0
+tenacity>=8.0
+pyyaml>=6.0
+python-dotenv>=1.0
