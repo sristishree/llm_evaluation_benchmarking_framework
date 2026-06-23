@@ -14,6 +14,7 @@ from tenacity import (
     wait_exponential,
 )
 
+from models.output_schemas import output_schema_for
 from models.result import GenerationConfig, RunResult
 from models.task import Task
 from runner.prompt_builder import build_messages
@@ -33,8 +34,14 @@ _DRY_RUN_OUTPUTS: dict[str, Any] = {
 class LLMClient:
     """LiteLLM-backed client for a single provider.
 
-    Handles JSON-mode requests, retries on transient errors, and
-    structured output extraction per task type.
+    When structured_output=True (default for cloud providers), requests use
+    response_format=json_schema. LiteLLM translates this per provider:
+      - OpenAI  → native json_schema
+      - Anthropic → tool use
+      - Gemini  → response_schema
+
+    When structured_output=False (Ollama and older models), falls back to
+    response_format=json_object with regex-based extraction.
     """
 
     def __init__(
@@ -46,6 +53,8 @@ class LLMClient:
         top_p: float = 1.0,
         timeout_seconds: int = 60,
         max_retries: int = 3,
+        structured_output: bool = True,
+        api_base: str | None = None,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -54,6 +63,8 @@ class LLMClient:
         self.top_p = top_p
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
+        self.structured_output = structured_output
+        self.api_base = api_base
 
     # ------------------------------------------------------------------
     # Public interface
@@ -87,13 +98,15 @@ class LLMClient:
                 dry_run=True,
             )
 
+        schema_cls = output_schema_for(task)
         messages = build_messages(task)
+
         t0 = time.monotonic()
-        response = self._call_with_retry(messages)
+        response = self._call_with_retry(messages, schema_cls)
         latency_ms = round((time.monotonic() - t0) * 1000, 2)
 
         raw = response.choices[0].message.content or ""
-        parsed, parse_error = _parse_output(task.task_type, raw)
+        parsed, parse_error = _parse_output(task.task_type, raw, schema_cls)
 
         usage = response.usage
         tokens = {
@@ -120,7 +133,21 @@ class LLMClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _call_with_retry(self, messages: list[dict]) -> Any:
+    def _build_response_format(self, schema_cls: type) -> dict:
+        if self.structured_output:
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": schema_cls.__name__,
+                    "schema": schema_cls.model_json_schema(),
+                },
+            }
+        return {"type": "json_object"}
+
+    def _call_with_retry(self, messages: list[dict], schema_cls: type) -> Any:
+        response_format = self._build_response_format(schema_cls)
+        extra = {"api_base": self.api_base} if self.api_base else {}
+
         for attempt in Retrying(
             stop=stop_after_attempt(self.max_retries),
             wait=wait_exponential(multiplier=1, min=2, max=30),
@@ -134,8 +161,9 @@ class LLMClient:
                     temperature=self.temperature,
                     max_tokens=self.max_tokens,
                     top_p=self.top_p,
-                    response_format={"type": "json_object"},
+                    response_format=response_format,
                     timeout=self.timeout_seconds,
+                    **extra,
                 )
 
 
@@ -150,24 +178,18 @@ def _extract_json(text: str) -> tuple[dict | None, str | None]:
     1. Direct json.loads on the full text.
     2. Strip markdown code fences and retry.
     3. Regex-extract the first {...} block.
-
-    Returns (parsed_dict, error_message). If all strategies fail,
-    parsed_dict is None and error_message describes the failure.
     """
-    # 1. Direct parse
     try:
         return json.loads(text), None
     except json.JSONDecodeError:
         pass
 
-    # 2. Strip markdown fences
     stripped = re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip(), flags=re.MULTILINE)
     try:
         return json.loads(stripped), None
     except json.JSONDecodeError:
         pass
 
-    # 3. Find first {...} block
     match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
@@ -178,23 +200,41 @@ def _extract_json(text: str) -> tuple[dict | None, str | None]:
     return None, f"Cannot parse JSON from output: {text[:300]!r}"
 
 
-def _parse_output(task_type: str, raw: str) -> tuple[Any, str | None]:
-    """Extract the task-relevant value from a JSON response."""
+def _parse_output(
+    task_type: str, raw: str, schema_cls: type
+) -> tuple[Any, str | None]:
+    """Validate raw JSON against schema_cls, then extract the task value."""
     data, err = _extract_json(raw)
     if err:
         return None, err
 
+    # Validate against Pydantic schema — catches field mismatches early.
     try:
-        if task_type == "summarization":
-            return data.get("summary"), None
-        if task_type == "extraction":
-            return data.get("entities", []), None
-        if task_type == "classification":
-            # model may return "label" (single) or "labels" (multi)
-            label = data.get("label") or data.get("labels")
-            return label, None
-        if task_type == "qa":
-            return data.get("answer"), None
-        return data, None
+        validated = schema_cls(**data)
     except Exception as exc:
-        return data, str(exc)
+        # Schema validation failed; fall back to best-effort key extraction.
+        return _best_effort_extract(task_type, data), f"Schema validation failed: {exc}"
+
+    # Pull the task-relevant field out of the validated model.
+    if task_type == "summarization":
+        return validated.summary, None
+    if task_type == "extraction":
+        return [e.model_dump() for e in validated.entities], None
+    if task_type == "classification":
+        return validated.label, None
+    if task_type == "qa":
+        return validated.answer, None
+    return data, None
+
+
+def _best_effort_extract(task_type: str, data: dict) -> Any:
+    """Key-based extraction when schema validation fails (e.g. Ollama responses)."""
+    if task_type == "summarization":
+        return data.get("summary")
+    if task_type == "extraction":
+        return data.get("entities", [])
+    if task_type == "classification":
+        return data.get("label")
+    if task_type == "qa":
+        return data.get("answer")
+    return data

@@ -72,6 +72,8 @@ def available_providers() -> list[str]:
 # ------------------------------------------------------------------
 
 def _make_client(config: ProviderConfig) -> LLMClient:
+    raw = _load_yaml()
+    entry = raw.get(config.provider, {})
     return LLMClient(
         provider=config.provider,
         model=config.model,
@@ -80,6 +82,8 @@ def _make_client(config: ProviderConfig) -> LLMClient:
         top_p=config.top_p,
         timeout_seconds=config.timeout_seconds,
         max_retries=config.max_retries,
+        structured_output=entry.get("structured_output", True),
+        api_base=entry.get("api_base"),
     )
 
 
