@@ -84,6 +84,7 @@ def _make_client(config: ProviderConfig) -> LLMClient:
         max_retries=config.max_retries,
         structured_output=entry.get("structured_output", True),
         api_base=entry.get("api_base"),
+        vision=entry.get("vision", True),
     )
 
 

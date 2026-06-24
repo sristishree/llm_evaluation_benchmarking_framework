@@ -55,6 +55,7 @@ class LLMClient:
         max_retries: int = 3,
         structured_output: bool = True,
         api_base: str | None = None,
+        vision: bool = True,
     ) -> None:
         self.provider = provider
         self.model = model
@@ -65,6 +66,7 @@ class LLMClient:
         self.max_retries = max_retries
         self.structured_output = structured_output
         self.api_base = api_base
+        self.vision = vision
 
     # ------------------------------------------------------------------
     # Public interface
@@ -99,7 +101,7 @@ class LLMClient:
             )
 
         schema_cls = output_schema_for(task)
-        messages = build_messages(task)
+        messages = build_messages(task, vision=self.vision)
 
         t0 = time.monotonic()
         response = self._call_with_retry(messages, schema_cls)

@@ -13,6 +13,17 @@ from typing import Annotated, Any, Literal, Union
 from pydantic import BaseModel, Field
 
 
+class MediaAttachment(BaseModel):
+    """A file attached to a task as supplementary input.
+
+    type   — "image" (sent as a base64 multimodal block) or
+             "pdf"   (text extracted and prepended to input)
+    source — local file path or publicly accessible URL
+    """
+    type: Literal["image", "pdf"]
+    source: str
+
+
 class TaskBase(BaseModel):
     """Common fields shared by every task type."""
     task_id: str
@@ -22,6 +33,7 @@ class TaskBase(BaseModel):
     expected: Any          # type varies — see concrete subclasses
     rubric: str            # natural language instructions for LLM-as-judge
     metadata: dict         # source, date_added, notes
+    media: list[MediaAttachment] = Field(default_factory=list)
 
 
 class SummarizationTask(TaskBase):
