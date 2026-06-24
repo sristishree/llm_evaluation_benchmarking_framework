@@ -13,6 +13,7 @@
 
 anthropic:
   structured_output: true
+  vision: true
   default_model: claude-sonnet-4-6
   available_models:
     - id: claude-sonnet-4-6
@@ -32,6 +33,7 @@ anthropic:
 
 openai:
   structured_output: true
+  vision: true
   default_model: gpt-4o
   available_models:
     - id: gpt-4o
@@ -49,6 +51,7 @@ openai:
 
 google:
   structured_output: true
+  vision: true
   default_model: gemini/gemini-2.0-flash
   available_models:
     - id: gemini/gemini-2.0-flash
@@ -66,6 +69,7 @@ google:
 
 ollama:
   structured_output: false
+  vision: false
   api_base: "http://localhost:11434"
   default_model: ollama/llama3.2
   available_models:
