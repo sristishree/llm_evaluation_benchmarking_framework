@@ -2,7 +2,7 @@
 
 Typical usage
 -------------
-    from runner.runner import run_task, run_batch, get_catalog
+    from runner.engine import run_task, run_batch, get_catalog
     from models.provider_config import ProviderConfig
 
     cfg = ProviderConfig(provider="anthropic", model="claude-sonnet-4-6")
