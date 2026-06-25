@@ -2,7 +2,7 @@
 
 Typical usage
 -------------
-    from runner.runner import run_task, run_batch, get_catalog
+    from runner.engine import run_task, run_batch, get_catalog
     from models.provider_config import ProviderConfig
 
     cfg = ProviderConfig(provider="anthropic", model="claude-sonnet-4-6")
@@ -16,6 +16,7 @@ Typical usage
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Iterable
 
@@ -83,7 +84,7 @@ def _make_client(config: ProviderConfig) -> LLMClient:
         timeout_seconds=config.timeout_seconds,
         max_retries=config.max_retries,
         structured_output=entry.get("structured_output", True),
-        api_base=entry.get("api_base"),
+        api_base=os.environ.get("LITELLM_BASE_URL"),
         vision=entry.get("vision", True),
     )
 

@@ -70,7 +70,6 @@ google:
 ollama:
   structured_output: false
   vision: false
-  api_base: "http://localhost:11434"
   default_model: ollama/llama3.2
   available_models:
     - id: ollama/llama3.2
