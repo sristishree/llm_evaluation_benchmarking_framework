@@ -324,6 +324,13 @@ class ResultsStore:
     # Export
     # -----------------------------------------------------------------------
 
+    def list_runs(self) -> list[dict]:
+        """Return all batch runs ordered by creation time, newest first."""
+        rows = self._conn.execute(
+            "SELECT * FROM run_batches ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def export_jsonl(self, path: str | Path, **filters) -> int:
         """Write filtered results to a JSONL file. Returns the row count."""
         rows = self.query(**filters)
