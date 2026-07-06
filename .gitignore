@@ -219,3 +219,7 @@ __marimo__/
 
 # Task bank data files (large generated artifacts — stored on HuggingFace Hub)
 *.jsonl
+
+# Node.js
+node_modules/
+launch.json

@@ -15,6 +15,6 @@ python-dotenv>=1.0
 # Phase 3 — Provider Integration (PDF + image inputs)
 pymupdf>=1.24.0
 
-# Phase 6 — Dashboard
-streamlit>=1.35.0
-plotly>=5.22.0
+# Phase 6 — Dashboard API
+fastapi>=0.111.0
+uvicorn[standard]>=0.30.0
