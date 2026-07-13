@@ -75,20 +75,20 @@ function HeatmapGrid({ data, taskType }) {
   )
 }
 
-export default function Heatmap() {
-  const { data, loading, error } = useApi(() => api.heatmap())
-  const [taskType, setTaskType] = useState(null)
+export default function Heatmap({ includeDryRuns = false }) {
+  const { data, loading, error } = useApi(() => api.heatmap(includeDryRuns), [includeDryRuns])
+  const [taskType, setTaskType] = useState('')
 
   const taskTypes = useMemo(() => {
     if (!data?.length) return []
     return [...new Set(data.map(r => r.task_type))].sort()
   }, [data])
 
-  const activeType = taskType ?? taskTypes[0]
-
   if (loading) return <Spinner />
   if (error)   return <ErrorCard message={error} />
   if (!data?.length) return <EmptyState message="No heatmap data available." />
+
+  const activeTypes = taskType ? [taskType] : taskTypes
 
   return (
     <div className="space-y-6">
@@ -102,9 +102,12 @@ export default function Heatmap() {
         <div className="w-52">
           <Select
             label="Task Type"
-            value={activeType ?? ''}
+            value={taskType}
             onChange={setTaskType}
-            options={taskTypes.map(t => ({ value: t, label: t.charAt(0).toUpperCase() + t.slice(1) }))}
+            options={[
+              { value: '', label: 'All task types' },
+              ...taskTypes.map(t => ({ value: t, label: t.charAt(0).toUpperCase() + t.slice(1) })),
+            ]}
           />
         </div>
       </div>
@@ -122,9 +125,14 @@ export default function Heatmap() {
         <span className="ml-auto">1.0</span>
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-        {activeType && <HeatmapGrid data={data} taskType={activeType} />}
-      </div>
+      {activeTypes.map(t => (
+        <div key={t} className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+          {!taskType && (
+            <h3 className="text-sm font-semibold text-gray-700 capitalize mb-4">{t}</h3>
+          )}
+          <HeatmapGrid data={data} taskType={t} />
+        </div>
+      ))}
     </div>
   )
 }

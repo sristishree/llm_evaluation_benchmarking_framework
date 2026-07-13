@@ -19,6 +19,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Iterable
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 import yaml
 
@@ -78,13 +81,14 @@ def _make_client(config: ProviderConfig) -> LLMClient:
     return LLMClient(
         provider=config.provider,
         model=config.model,
+        api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+        api_key=os.environ.get("LITELLM_API_KEY"),
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         top_p=config.top_p,
         timeout_seconds=config.timeout_seconds,
         max_retries=config.max_retries,
         structured_output=entry.get("structured_output", True),
-        api_base=os.environ.get("LITELLM_BASE_URL"),
         vision=entry.get("vision", True),
     )
 
@@ -108,3 +112,4 @@ def run_batch(
         status = "DRY RUN" if dry_run else f"{result.latency_ms:.0f}ms"
         print(f"  [{i+1:>4}] {task.task_id}  |  {status}")
     return results
+

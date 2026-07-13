@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 import litellm
+import openai
+from openai import OpenAI
 from tenacity import (
     Retrying,
     retry_if_exception_type,
@@ -19,9 +21,9 @@ from models.result import GenerationConfig, RunResult
 from models.task import Task
 from runner.prompt_builder import build_messages
 
-# Errors worth retrying — rate limits and temporary outages only.
-# Auth errors, bad requests, and timeouts are NOT retried.
-_RETRYABLE = (litellm.RateLimitError, litellm.ServiceUnavailableError)
+# Rate-limit and transient server errors are worth retrying.
+# Auth errors, bad requests, and timeouts are not.
+_RETRYABLE = (openai.RateLimitError, openai.APIStatusError)
 
 _DRY_RUN_OUTPUTS: dict[str, Any] = {
     "summarization": "Dry-run placeholder summary.",
@@ -32,29 +34,29 @@ _DRY_RUN_OUTPUTS: dict[str, Any] = {
 
 
 class LLMClient:
-    """LiteLLM-backed client for a single provider.
+    """OpenAI-client-backed LLM client.
 
-    When structured_output=True (default for cloud providers), requests use
-    response_format=json_schema. LiteLLM translates this per provider:
-      - OpenAI  → native json_schema
-      - Anthropic → tool use
-      - Gemini  → response_schema
+    Uses the openai SDK directly against either the official endpoints or a
+    LiteLLM proxy (which speaks the OpenAI protocol). Pass api_base and
+    api_key to point at a proxy; omit them to use the standard endpoint
+    resolved from environment variables (OPENAI_API_KEY, etc.).
 
-    When structured_output=False (Ollama and older models), falls back to
-    response_format=json_object with regex-based extraction.
+    structured_output=True  → response_format=json_schema
+    structured_output=False → response_format=json_object + regex extraction
     """
 
     def __init__(
         self,
         provider: str,
         model: str,
+        api_base: str,
+        api_key: str,
         temperature: float = 0.0,
         max_tokens: int = 1024,
         top_p: float = 1.0,
         timeout_seconds: int = 60,
         max_retries: int = 3,
         structured_output: bool = True,
-        api_base: str | None = None,
         vision: bool = True,
     ) -> None:
         self.provider = provider
@@ -65,19 +67,18 @@ class LLMClient:
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
         self.structured_output = structured_output
-        self.api_base = api_base
         self.vision = vision
+
+        self._client = OpenAI(
+            base_url=api_base,
+            api_key=api_key
+        )
 
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
 
     def call(self, task: Task, dry_run: bool = False) -> RunResult:
-        """Run the task and return a RunResult.
-
-        In dry-run mode no API call is made; a placeholder result is returned
-        so callers can verify prompt construction and downstream logic cheaply.
-        """
         gen_config = GenerationConfig(
             model=self.model,
             temperature=self.temperature,
@@ -117,6 +118,15 @@ class LLMClient:
             "total": getattr(usage, "total_tokens", 0) or 0,
         }
 
+        cost = None
+        if hasattr(response, "_hidden_params"):
+            cost = response._hidden_params.get("response_cost")
+        if cost is None:
+            try:
+                cost = litellm.completion_cost(completion_response=response)
+            except Exception:
+                cost = None
+
         return RunResult(
             task_id=task.task_id,
             task_type=task.task_type,
@@ -128,6 +138,7 @@ class LLMClient:
             parse_error=parse_error,
             tokens_used=tokens,
             latency_ms=latency_ms,
+            estimated_cost_usd=cost,
             timestamp=datetime.now(tz=timezone.utc),
         )
 
@@ -148,7 +159,6 @@ class LLMClient:
 
     def _call_with_retry(self, messages: list[dict], schema_cls: type) -> Any:
         response_format = self._build_response_format(schema_cls)
-        extra = {"api_base": self.api_base} if self.api_base else {}
 
         for attempt in Retrying(
             stop=stop_after_attempt(self.max_retries),
@@ -157,7 +167,7 @@ class LLMClient:
             reraise=True,
         ):
             with attempt:
-                return litellm.completion(
+                return self._client.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=self.temperature,
@@ -165,7 +175,6 @@ class LLMClient:
                     top_p=self.top_p,
                     response_format=response_format,
                     timeout=self.timeout_seconds,
-                    **extra,
                 )
 
 
@@ -174,13 +183,6 @@ class LLMClient:
 # ------------------------------------------------------------------
 
 def _extract_json(text: str) -> tuple[dict | None, str | None]:
-    """Extract the first JSON object from model output.
-
-    Tries three strategies in order:
-    1. Direct json.loads on the full text.
-    2. Strip markdown code fences and retry.
-    3. Regex-extract the first {...} block.
-    """
     try:
         return json.loads(text), None
     except json.JSONDecodeError:
@@ -205,19 +207,15 @@ def _extract_json(text: str) -> tuple[dict | None, str | None]:
 def _parse_output(
     task_type: str, raw: str, schema_cls: type
 ) -> tuple[Any, str | None]:
-    """Validate raw JSON against schema_cls, then extract the task value."""
     data, err = _extract_json(raw)
     if err:
         return None, err
 
-    # Validate against Pydantic schema — catches field mismatches early.
     try:
         validated = schema_cls(**data)
     except Exception as exc:
-        # Schema validation failed; fall back to best-effort key extraction.
         return _best_effort_extract(task_type, data), f"Schema validation failed: {exc}"
 
-    # Pull the task-relevant field out of the validated model.
     if task_type == "summarization":
         return validated.summary, None
     if task_type == "extraction":
@@ -230,7 +228,6 @@ def _parse_output(
 
 
 def _best_effort_extract(task_type: str, data: dict) -> Any:
-    """Key-based extraction when schema validation fails (e.g. Ollama responses)."""
     if task_type == "summarization":
         return data.get("summary")
     if task_type == "extraction":

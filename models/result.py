@@ -34,6 +34,7 @@ class RunResult(BaseModel):
     parse_error: str | None = None       # set if JSON extraction failed
     tokens_used: dict[str, int]          # {"prompt": N, "completion": N, "total": N}
     latency_ms: float
+    estimated_cost_usd: float | None = None
     timestamp: datetime = Field(default_factory=lambda: datetime.now(tz=timezone.utc))
     dry_run: bool = False
 
@@ -65,5 +66,6 @@ class ScoredResult(BaseModel):
     result: RunResult
     difficulty: Literal["easy", "medium", "hard"]
     domain: str
+    expected: Any | None = None
     scores: Scores = Field(default_factory=Scores)
     estimated_cost_usd: float | None = None

@@ -1,3 +1,4 @@
 {
-    "python.defaultInterpreterPath": "/home/sristi/.pyenv/versions/venv_llm_benchmarking_3.12/bin/python"
+    "python.defaultInterpreterPath": "/home/sristi/.pyenv/versions/venv_llm_benchmarking_3.12/bin/python",
+    "python-envs.defaultEnvManager": "ms-python.python:pyenv"
 }

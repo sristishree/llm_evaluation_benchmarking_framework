@@ -24,12 +24,24 @@ function ScoreBadge({ label, value }) {
   )
 }
 
-function ResponseCard({ row }) {
-  let parsed = null
-  if (row.parsed_output) {
-    try { parsed = JSON.parse(row.parsed_output) } catch {}
+function OutputBlock({ label, value, highlight }) {
+  let display = '(none)'
+  if (value != null) {
+    try { display = JSON.stringify(JSON.parse(value), null, 2) } catch { display = value }
   }
+  return (
+    <div className={`px-4 py-3 border-t border-gray-100${highlight ? ' bg-red-50' : ''}`}>
+      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">{label}</p>
+      <pre className="text-xs text-gray-700 whitespace-pre-wrap bg-gray-50 rounded-lg p-3 max-h-40 overflow-y-auto font-mono">
+        {display}
+      </pre>
+    </div>
+  )
+}
+
+function ResponseCard({ row }) {
   const scores = SCORE_FIELDS.filter(f => row[f.key] != null)
+  const isWrong = row.exact_match != null && row.exact_match < 1.0
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col min-w-0">
@@ -54,23 +66,13 @@ function ResponseCard({ row }) {
         </div>
       )}
 
-      {/* Raw output */}
-      <div className="px-4 py-3 flex-1">
-        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Raw Output</p>
-        <pre className="text-xs text-gray-700 whitespace-pre-wrap break-words bg-gray-50 rounded-lg p-3 max-h-64 overflow-y-auto font-mono leading-relaxed">
-          {row.raw_output || '(empty)'}
-        </pre>
-      </div>
-
-      {/* Parsed output */}
-      {parsed && (
-        <div className="px-4 py-3 border-t border-gray-100">
-          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Parsed Output</p>
-          <pre className="text-xs text-gray-700 whitespace-pre-wrap bg-gray-50 rounded-lg p-3 max-h-40 overflow-y-auto font-mono">
-            {JSON.stringify(parsed, null, 2)}
-          </pre>
-        </div>
+      {/* Expected answer */}
+      {row.expected != null && (
+        <OutputBlock label="Expected" value={row.expected} />
       )}
+
+      {/* Model prediction */}
+      <OutputBlock label="Model Prediction" value={row.parsed_output} highlight={isWrong} />
 
       {/* Parse error */}
       {row.parse_error && (

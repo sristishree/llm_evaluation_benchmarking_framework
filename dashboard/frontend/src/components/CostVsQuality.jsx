@@ -25,8 +25,8 @@ function CustomTooltip({ active, payload }) {
   )
 }
 
-export default function CostVsQuality() {
-  const { data, loading, error } = useApi(() => api.costQuality())
+export default function CostVsQuality({ includeDryRuns = false }) {
+  const { data, loading, error } = useApi(() => api.costQuality(includeDryRuns), [includeDryRuns])
 
   const { series, providers } = useMemo(() => {
     if (!data?.length) return { series: [], providers: [] }
