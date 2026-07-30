@@ -63,7 +63,7 @@ def main() -> None:
         task = _load_first(path)
         messages = build_messages(task, vision=True)
         schema_cls = output_schema_for(task)
-        result = run_task(task, cfg, dry_run=True)
+        result = run_task(task, cfg) #, dry_run=True)
 
         print(f"\n{'='*60}")
         print(f"Task type : {task.task_type}")

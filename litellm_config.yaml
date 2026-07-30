@@ -1,0 +1,4 @@
+general_settings:
+  master_key: sk-local-dev
+  database_url: "postgresql://litellm:litellm@localhost:5432/litellm"
+  store_model_in_db: true

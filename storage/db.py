@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS run_results (
     max_tokens         INTEGER NOT NULL,
     top_p              REAL    NOT NULL DEFAULT 1.0,
     seed               INTEGER,
+    expected           TEXT,
     raw_output         TEXT,
     parsed_output      TEXT,
     parse_error        TEXT,
@@ -92,7 +93,13 @@ class ResultsStore:
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_DDL)
+        self._migrate()
         self._conn.commit()
+
+    def _migrate(self) -> None:
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(run_results)")}
+        if "expected" not in existing:
+            self._conn.execute("ALTER TABLE run_results ADD COLUMN expected TEXT")
 
     # -----------------------------------------------------------------------
     # Write
@@ -117,6 +124,7 @@ class ResultsStore:
             "max_tokens":         r.generation_config.max_tokens,
             "top_p":              r.generation_config.top_p,
             "seed":               r.generation_config.seed,
+            "expected":           json.dumps(scored.expected) if scored.expected is not None else None,
             "raw_output":         r.raw_output,
             "parsed_output":      json.dumps(r.parsed_output) if r.parsed_output is not None else None,
             "parse_error":        r.parse_error,
@@ -246,54 +254,87 @@ class ResultsStore:
     # Read — aggregates (used by the dashboard)
     # -----------------------------------------------------------------------
 
-    def agg_by_provider_and_type(self) -> list[dict]:
-        """Per-provider, per-task-type score breakdown (excludes dry runs)."""
-        rows = self._conn.execute("""
+    def agg_by_provider_and_type(self, exclude_dry_runs: bool = True) -> list[dict]:
+        """Per-provider, per-task-type score breakdown."""
+        where = "WHERE dry_run = 0" if exclude_dry_runs else ""
+        rows = self._conn.execute(f"""
             SELECT
                 provider, model, task_type,
                 COUNT(*)                    AS n,
+                AVG(rouge_1)                AS avg_rouge_1,
+                AVG(rouge_2)                AS avg_rouge_2,
                 AVG(rouge_l)                AS avg_rouge_l,
                 AVG(bert_score)             AS avg_bert_score,
                 AVG(exact_match)            AS avg_exact_match,
-                AVG(llm_judge_score)        AS avg_llm_judge,
+                AVG(token_f1)               AS avg_token_f1,
+                SQRT(MAX(0, AVG(rouge_l * rouge_l)       - AVG(rouge_l) * AVG(rouge_l)))           AS std_rouge_l,
+                SQRT(MAX(0, AVG(bert_score * bert_score) - AVG(bert_score) * AVG(bert_score)))     AS std_bert_score,
+                SQRT(MAX(0, AVG(exact_match * exact_match) - AVG(exact_match) * AVG(exact_match))) AS std_exact_match,
+                SQRT(MAX(0, AVG(token_f1 * token_f1)     - AVG(token_f1) * AVG(token_f1)))         AS std_token_f1,
+                COUNT(CASE WHEN parse_error IS NOT NULL THEN 1 END) * 100.0 / COUNT(*) AS parse_failure_pct,
+                AVG(json_extract(scores_json, '$.entity_precision')) AS avg_entity_precision,
+                AVG(json_extract(scores_json, '$.entity_recall'))    AS avg_entity_recall,
                 SUM(total_tokens)           AS total_tokens,
                 SUM(estimated_cost_usd)     AS total_cost_usd,
                 AVG(latency_ms)             AS avg_latency_ms
             FROM run_results
-            WHERE dry_run = 0
+            {where}
             GROUP BY provider, model, task_type
             ORDER BY provider, task_type
         """).fetchall()
         return [dict(r) for r in rows]
 
-    def agg_heatmap(self) -> list[dict]:
+    def agg_by_domain(self, exclude_dry_runs: bool = True) -> list[dict]:
+        """Per-domain score breakdown — powers the domain performance chart."""
+        where = "WHERE dry_run = 0" if exclude_dry_runs else ""
+        rows = self._conn.execute(f"""
+            SELECT
+                provider, model, task_type, domain,
+                COUNT(*) AS n,
+                AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score)) AS avg_score,
+                SQRT(MAX(0,
+                    AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score) *
+                        COALESCE(rouge_l, token_f1, exact_match, bert_score))
+                    - AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score))
+                    * AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score))
+                )) AS std_score
+            FROM run_results
+            {where}
+            GROUP BY provider, model, task_type, domain
+            ORDER BY domain, provider
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def agg_heatmap(self, exclude_dry_runs: bool = True) -> list[dict]:
         """Provider × difficulty matrix — powers the task-level heatmap."""
-        rows = self._conn.execute("""
+        where = "WHERE dry_run = 0" if exclude_dry_runs else ""
+        rows = self._conn.execute(f"""
             SELECT
                 provider, model, task_type, difficulty,
                 COUNT(*) AS n,
                 AVG(
-                    COALESCE(rouge_l, bert_score, exact_match, llm_judge_score)
+                    COALESCE(rouge_l, token_f1, exact_match, bert_score, llm_judge_score)
                 ) AS avg_score
             FROM run_results
-            WHERE dry_run = 0
+            {where}
             GROUP BY provider, model, task_type, difficulty
             ORDER BY provider, task_type, difficulty
         """).fetchall()
         return [dict(r) for r in rows]
 
-    def agg_cost_vs_quality(self) -> list[dict]:
+    def agg_cost_vs_quality(self, exclude_dry_runs: bool = True) -> list[dict]:
         """Per-run cost vs quality — powers the scatter plot."""
-        rows = self._conn.execute("""
+        dry_clause = "dry_run = 0 AND " if exclude_dry_runs else ""
+        rows = self._conn.execute(f"""
             SELECT
                 run_id, provider, model, task_type,
                 SUM(estimated_cost_usd)     AS total_cost_usd,
                 AVG(
-                    COALESCE(rouge_l, bert_score, exact_match, llm_judge_score)
+                    COALESCE(rouge_l, token_f1, exact_match, bert_score, llm_judge_score)
                 )                           AS avg_score,
                 COUNT(*)                    AS n
             FROM run_results
-            WHERE dry_run = 0 AND estimated_cost_usd IS NOT NULL
+            WHERE {dry_clause}estimated_cost_usd IS NOT NULL
             GROUP BY run_id, provider, model, task_type
             ORDER BY total_cost_usd
         """).fetchall()
@@ -323,6 +364,31 @@ class ResultsStore:
     # -----------------------------------------------------------------------
     # Export
     # -----------------------------------------------------------------------
+
+    def list_runs(self) -> list[dict]:
+        """Return all batch runs ordered by creation time, newest first.
+
+        Includes an ``is_dry_run`` flag derived from the run_results rows
+        (1 if every result in the run has dry_run=1, 0 otherwise).
+        """
+        rows = self._conn.execute("""
+            SELECT
+                rb.*,
+                COALESCE(MAX(rr.dry_run), 0) AS is_dry_run
+            FROM run_batches rb
+            LEFT JOIN run_results rr ON rb.run_id = rr.run_id
+            GROUP BY rb.run_id
+            ORDER BY rb.created_at DESC
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_run(self, run_id: str) -> int:
+        """Delete a run and all its results. Returns the number of result rows deleted."""
+        cur = self._conn.execute("DELETE FROM run_results WHERE run_id = ?", (run_id,))
+        deleted = cur.rowcount
+        self._conn.execute("DELETE FROM run_batches WHERE run_id = ?", (run_id,))
+        self._conn.commit()
+        return deleted
 
     def export_jsonl(self, path: str | Path, **filters) -> int:
         """Write filtered results to a JSONL file. Returns the row count."""
