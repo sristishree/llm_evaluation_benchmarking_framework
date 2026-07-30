@@ -267,6 +267,12 @@ def cost_vs_quality(include_dry_runs: bool = Query(False)) -> list[dict[str, Any
         return s.agg_cost_vs_quality(exclude_dry_runs=not include_dry_runs)
 
 
+@app.get("/api/scores/by-domain")
+def score_by_domain(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    with _store() as s:
+        return s.agg_by_domain(exclude_dry_runs=not include_dry_runs)
+
+
 @app.get("/api/scores/distribution")
 def score_distribution(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
     """Individual score values per result — used for histogram charts."""
@@ -277,8 +283,12 @@ def score_distribution(include_dry_runs: bool = Query(False)) -> list[dict[str, 
                 "provider":    r["provider"],
                 "model":       r["model"],
                 "task_type":   r["task_type"],
+                "difficulty":  r["difficulty"],
+                "domain":      r["domain"],
                 "exact_match": r["exact_match"],
                 "rouge_l":     r["rouge_l"],
+                "rouge_1":     r["rouge_1"],
+                "rouge_2":     r["rouge_2"],
                 "token_f1":    r["token_f1"],
                 "bert_score":  r["bert_score"],
             }

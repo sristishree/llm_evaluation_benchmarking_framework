@@ -2,7 +2,7 @@ import { useState, useMemo } from 'react'
 import {
   BarChart, Bar, ScatterChart, Scatter,
   XAxis, YAxis, CartesianGrid,
-  Tooltip, Legend, ResponsiveContainer,
+  Tooltip, Legend, ResponsiveContainer, ErrorBar,
 } from 'recharts'
 import { api } from '../api'
 import { useApi } from '../hooks/useApi'
@@ -19,23 +19,34 @@ const METRICS = [
   { value: 'avg_token_f1',    label: 'Token F1' },
 ]
 
+function ParseFailBadge({ pct }) {
+  if (pct == null) return <span className="text-gray-400">—</span>
+  const color = pct >= 10 ? 'bg-red-100 text-red-700'
+              : pct >= 3  ? 'bg-yellow-100 text-yellow-700'
+              :              'bg-green-100 text-green-700'
+  return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${color}`}>{pct.toFixed(1)}%</span>
+}
+
 const TABLE_COLS = [
-  { key: 'provider',        label: 'Provider',    render: r => r.provider,       sortable: true },
-  { key: 'model',           label: 'Model',       render: r => r.model,          sortable: true },
-  { key: 'task_type',       label: 'Task Type',   render: r => r.task_type,      sortable: true },
-  { key: 'n',               label: 'n',           render: r => r.n,              sortable: true },
-  { key: 'avg_rouge_1',     label: 'ROUGE-1',     render: r => r.avg_rouge_1?.toFixed(3)     ?? '—', sortable: true },
-  { key: 'avg_rouge_2',     label: 'ROUGE-2',     render: r => r.avg_rouge_2?.toFixed(3)     ?? '—', sortable: true },
-  { key: 'avg_rouge_l',     label: 'ROUGE-L',     render: r => r.avg_rouge_l?.toFixed(3)     ?? '—', sortable: true },
-  { key: 'avg_bert_score',  label: 'BERTScore',   render: r => r.avg_bert_score?.toFixed(3)  ?? '—', sortable: true },
-  { key: 'avg_exact_match', label: 'Exact Match', render: r => r.avg_exact_match?.toFixed(3) ?? '—', sortable: true },
-  { key: 'avg_token_f1',    label: 'Token F1',    render: r => r.avg_token_f1?.toFixed(3)    ?? '—', sortable: true },
-  { key: 'avg_latency_ms',  label: 'Avg Latency', render: r => r.avg_latency_ms != null ? `${Math.round(r.avg_latency_ms)} ms` : '—', sortable: true },
+  { key: 'provider',            label: 'Provider',       render: r => r.provider,                 sortable: true },
+  { key: 'model',               label: 'Model',          render: r => r.model,                    sortable: true },
+  { key: 'task_type',           label: 'Task Type',      render: r => r.task_type,                sortable: true },
+  { key: 'n',                   label: 'n',              render: r => r.n,                        sortable: true },
+  { key: 'avg_rouge_1',         label: 'ROUGE-1',        render: r => r.avg_rouge_1?.toFixed(3)     ?? '—', sortable: true },
+  { key: 'avg_rouge_2',         label: 'ROUGE-2',        render: r => r.avg_rouge_2?.toFixed(3)     ?? '—', sortable: true },
+  { key: 'avg_rouge_l',         label: 'ROUGE-L',        render: r => r.avg_rouge_l?.toFixed(3)     ?? '—', sortable: true },
+  { key: 'avg_bert_score',      label: 'BERTScore',      render: r => r.avg_bert_score?.toFixed(3)  ?? '—', sortable: true },
+  { key: 'avg_exact_match',     label: 'Exact Match',    render: r => r.avg_exact_match?.toFixed(3) ?? '—', sortable: true },
+  { key: 'avg_token_f1',        label: 'Token F1',       render: r => r.avg_token_f1?.toFixed(3)    ?? '—', sortable: true },
+  { key: 'avg_entity_precision',label: 'NER Precision',  render: r => r.task_type === 'extraction' ? (r.avg_entity_precision?.toFixed(3) ?? '—') : <span className="text-gray-300">n/a</span>, sortable: true },
+  { key: 'avg_entity_recall',   label: 'NER Recall',     render: r => r.task_type === 'extraction' ? (r.avg_entity_recall?.toFixed(3) ?? '—') : <span className="text-gray-300">n/a</span>, sortable: true },
+  { key: 'avg_latency_ms',      label: 'Avg Latency',    render: r => r.avg_latency_ms != null ? `${Math.round(r.avg_latency_ms)} ms` : '—', sortable: true },
+  { key: 'parse_failure_pct',   label: 'Parse Fail %',   render: r => <ParseFailBadge pct={r.parse_failure_pct} />, sortable: true },
 ]
 
 // ─── Filter bar ────────────────────────────────────────────────────────────────
 
-function FilterBar({ allProviderKeys, selectedProviders, onToggleProvider, allTaskTypes, selectedTasks, onToggleTask, minSamples, onMinSamples, viewMode, onViewMode, metric, onMetric, availableMetrics, providerColors }) {
+function FilterBar({ allProviderKeys, selectedProviders, onToggleProvider, allTaskTypes, selectedTasks, onToggleTask, minSamples, onMinSamples, viewMode, onViewMode, metric, onMetric, availableMetrics, providerColors, showErrorBars, onShowErrorBars }) {
   return (
     <div className="bg-gray-50 rounded-xl border border-gray-200 p-4 space-y-3">
       <div className="flex flex-wrap items-end gap-4">
@@ -100,6 +111,18 @@ function FilterBar({ allProviderKeys, selectedProviders, onToggleProvider, allTa
           />
         </div>
 
+        {viewMode === 'overview' && metric !== '' && (
+          <label className="flex items-center gap-2 cursor-pointer select-none text-sm text-gray-600 pb-1">
+            <input
+              type="checkbox"
+              checked={showErrorBars}
+              onChange={e => onShowErrorBars(e.target.checked)}
+              className="w-4 h-4 accent-blue-500"
+            />
+            Show ±1σ error bars
+          </label>
+        )}
+
       </div>
 
       {allProviderKeys.length > 0 && (
@@ -136,8 +159,9 @@ function FilterBar({ allProviderKeys, selectedProviders, onToggleProvider, allTa
 
 // ─── Overview chart (task type × provider) ─────────────────────────────────────
 
-function OverviewChart({ data, providerKeys, effectiveMetric, providerColors, availableMetrics }) {
+function OverviewChart({ data, providerKeys, effectiveMetric, providerColors, availableMetrics, showErrorBars }) {
   const chartData = useMemo(() => {
+    const stdKey = effectiveMetric.replace('avg_', 'std_')
     const pivot = {}
     data.forEach(row => {
       const pk = `${row.provider} / ${row.model}`
@@ -146,7 +170,8 @@ function OverviewChart({ data, providerKeys, effectiveMetric, providerColors, av
         const vals = availableMetrics.map(m => row[m.value]).filter(v => v != null)
         pivot[row.task_type][pk] = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null
       } else {
-        pivot[row.task_type][pk] = row[effectiveMetric] ?? null
+        pivot[row.task_type][pk]           = row[effectiveMetric] ?? null
+        pivot[row.task_type][`${pk}__std`] = row[stdKey] ?? null
       }
     })
     return Object.values(pivot)
@@ -169,7 +194,11 @@ function OverviewChart({ data, providerKeys, effectiveMetric, providerColors, av
           />
           <Legend />
           {providerKeys.map(pk => (
-            <Bar key={pk} dataKey={pk} fill={providerColors[pk]} radius={[4, 4, 0, 0]} />
+            <Bar key={pk} dataKey={pk} fill={providerColors[pk]} radius={[4, 4, 0, 0]}>
+              {showErrorBars && effectiveMetric !== '' && (
+                <ErrorBar dataKey={`${pk}__std`} width={4} strokeWidth={1.5} stroke={providerColors[pk]} />
+              )}
+            </Bar>
           ))}
         </BarChart>
       </ResponsiveContainer>
@@ -361,7 +390,7 @@ function ScoreScatter({ includeDryRuns, selectedProviders, providerColors, allPr
 
       <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
         <ResponsiveContainer width="100%" height={300}>
-          <ScatterChart margin={{ top: 10, right: 20, left: 0, bottom: 40 }}>
+          <ScatterChart margin={{ top: 10, right: 20, left: 0, bottom: 30 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
             <XAxis
               type="number"
@@ -393,7 +422,7 @@ function ScoreScatter({ includeDryRuns, selectedProviders, providerColors, allPr
                 )
               }}
             />
-            <Legend />
+            <Legend verticalAlign="top" wrapperStyle={{ paddingBottom: 12 }} />
             {scatterSeries.map(({ pk, color, points }) => (
               <Scatter key={pk} name={pk} data={points} fill={color} opacity={0.75} r={5} />
             ))}
@@ -407,6 +436,81 @@ function ScoreScatter({ includeDryRuns, selectedProviders, providerColors, allPr
   )
 }
 
+// ─── ROUGE-L vs BERTScore correlation scatter (summarization only) ─────────────
+
+function MetricCorrelationScatter({ includeDryRuns, selectedProviders, providerColors, allProviderKeys }) {
+  const { data, loading, error } = useApi(() => api.distribution(includeDryRuns), [includeDryRuns])
+
+  const series = useMemo(() => {
+    if (!data?.length) return []
+    const summRows = data.filter(r =>
+      r.task_type === 'summarization' && r.rouge_l != null && r.bert_score != null
+    )
+    const activeProviders = allProviderKeys.filter(pk =>
+      selectedProviders.size === 0 || selectedProviders.has(pk)
+    )
+    return activeProviders.map(pk => ({
+      pk,
+      color: providerColors[pk],
+      points: summRows
+        .filter(r => `${r.provider} / ${r.model}` === pk)
+        .map(r => ({ x: r.rouge_l, y: r.bert_score, domain: r.domain, difficulty: r.difficulty, pk })),
+    })).filter(s => s.points.length > 0)
+  }, [data, selectedProviders, allProviderKeys, providerColors])
+
+  if (loading) return <Spinner />
+  if (error)   return <ErrorCard message={error} />
+  if (!series.length) return null
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <SectionHeader>ROUGE-L vs BERTScore Correlation</SectionHeader>
+        <p className="text-sm text-gray-500 -mt-3">
+          Summarization only · top-left = semantically correct but differently worded · bottom-right = surface match but weak semantics
+        </p>
+      </div>
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+        <ResponsiveContainer width="100%" height={320}>
+          <ScatterChart margin={{ top: 10, right: 30, bottom: 30, left: 10 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+            <XAxis
+              type="number" dataKey="x" name="ROUGE-L"
+              domain={[0, 1]} tickFormatter={v => v.toFixed(1)} tick={{ fontSize: 12 }}
+              label={{ value: 'ROUGE-L', position: 'insideBottom', offset: -16, fontSize: 13 }}
+            />
+            <YAxis
+              type="number" dataKey="y" name="BERTScore"
+              domain={[0, 1]} tickFormatter={v => v.toFixed(1)} tick={{ fontSize: 12 }}
+              label={{ value: 'BERTScore', angle: -90, position: 'insideLeft', fontSize: 13 }}
+            />
+            <Tooltip
+              cursor={{ strokeDasharray: '3 3' }}
+              content={({ payload }) => {
+                if (!payload?.length) return null
+                const { x, y, domain, difficulty, pk } = payload[0].payload
+                return (
+                  <div className="bg-white border border-gray-200 rounded-lg px-3 py-2 text-xs shadow-sm">
+                    <p className="font-semibold text-gray-800 mb-0.5">{pk}</p>
+                    <p className="text-gray-600">Domain: {domain} · {difficulty}</p>
+                    <p className="mt-1">ROUGE-L: <span className="font-medium">{x.toFixed(3)}</span></p>
+                    <p>BERTScore: <span className="font-medium">{y.toFixed(3)}</span></p>
+                  </div>
+                )
+              }}
+            />
+            <Legend />
+            {series.map(({ pk, color, points }) => (
+              <Scatter key={pk} name={pk} data={points} fill={color} opacity={0.7} r={5} />
+            ))}
+          </ScatterChart>
+        </ResponsiveContainer>
+        <p className="text-xs text-gray-400 text-center mt-1">Each dot is one scored summarization result</p>
+      </div>
+    </div>
+  )
+}
+
 // ─── Root ───────────────────────────────────────────────────────────────────────
 
 export default function ScoreBreakdown({ includeDryRuns = false }) {
@@ -414,6 +518,7 @@ export default function ScoreBreakdown({ includeDryRuns = false }) {
 
   const [metric,        setMetric]        = useState('avg_rouge_l')
   const [scatterMetric, setScatterMetric] = useState('rouge_l')
+  const [showErrorBars,     setShowErrorBars]     = useState(false)
   const [viewMode,          setViewMode]          = useState('overview')
   const [selectedProviders, setSelectedProviders] = useState(new Set())
   const [selectedTasks,     setSelectedTasks]     = useState(new Set())
@@ -489,6 +594,8 @@ export default function ScoreBreakdown({ includeDryRuns = false }) {
         onMetric={setMetric}
         availableMetrics={availableMetrics}
         providerColors={providerColors}
+        showErrorBars={showErrorBars}
+        onShowErrorBars={setShowErrorBars}
       />
 
       {viewMode === 'overview' ? (
@@ -498,6 +605,7 @@ export default function ScoreBreakdown({ includeDryRuns = false }) {
           effectiveMetric={effectiveMetric}
           providerColors={providerColors}
           availableMetrics={availableMetrics}
+          showErrorBars={showErrorBars}
         />
       ) : (
         <PerTaskCharts
@@ -518,6 +626,13 @@ export default function ScoreBreakdown({ includeDryRuns = false }) {
         allProviderKeys={allProviderKeys}
         scatterMetric={scatterMetric}
         onScatterMetric={setScatterMetric}
+      />
+
+      <MetricCorrelationScatter
+        includeDryRuns={includeDryRuns}
+        selectedProviders={selectedProviders}
+        providerColors={providerColors}
+        allProviderKeys={allProviderKeys}
       />
     </div>
   )

@@ -1,7 +1,13 @@
 import { useState, useMemo } from 'react'
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer,
+} from 'recharts'
 import { api } from '../api'
 import { useApi } from '../hooks/useApi'
 import { Spinner, ErrorCard, EmptyState, SectionHeader, Select } from './ui'
+
+const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4']
 
 const DIFFICULTIES = ['easy', 'medium', 'hard']
 
@@ -75,6 +81,68 @@ function HeatmapGrid({ data, taskType }) {
   )
 }
 
+function DifficultyDegradation({ data, taskType }) {
+  const { chartData, providerKeys, providerColors } = useMemo(() => {
+    const filtered = data.filter(r => !taskType || r.task_type === taskType)
+    const allProviderKeys = [...new Set(filtered.map(r => `${r.provider} / ${r.model}`))].sort()
+    const providerColors  = Object.fromEntries(allProviderKeys.map((pk, i) => [pk, COLORS[i % COLORS.length]]))
+
+    const pivot = { easy: { diff: 'Easy' }, medium: { diff: 'Medium' }, hard: { diff: 'Hard' } }
+    filtered.forEach(row => {
+      const pk = `${row.provider} / ${row.model}`
+      if (pivot[row.difficulty]) {
+        const existing = pivot[row.difficulty][pk]
+        if (existing == null || row.avg_score > existing) {
+          pivot[row.difficulty][pk] = row.avg_score
+        }
+      }
+    })
+
+    return {
+      chartData:    ['easy', 'medium', 'hard'].map(d => pivot[d]),
+      providerKeys: allProviderKeys,
+      providerColors,
+    }
+  }, [data, taskType])
+
+  if (!providerKeys.length) return null
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
+      <h3 className="text-sm font-semibold text-gray-700 mb-4">
+        Difficulty Degradation — {taskType ? taskType.charAt(0).toUpperCase() + taskType.slice(1) : 'All Task Types'}
+      </h3>
+      <ResponsiveContainer width="100%" height={260}>
+        <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <XAxis dataKey="diff" tick={{ fontSize: 13 }} />
+          <YAxis domain={[0, 1]} tickFormatter={v => v.toFixed(1)} tick={{ fontSize: 12 }} />
+          <Tooltip
+            formatter={(val, name) => [val != null ? val.toFixed(3) : '—', name]}
+            contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb', fontSize: 13 }}
+          />
+          <Legend />
+          {providerKeys.map((pk, i) => (
+            <Line
+              key={pk}
+              type="monotone"
+              dataKey={pk}
+              stroke={providerColors[pk]}
+              strokeWidth={2}
+              dot={{ r: 5, fill: providerColors[pk] }}
+              activeDot={{ r: 7 }}
+              connectNulls
+            />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+      <p className="text-xs text-gray-400 text-center mt-1">
+        Steeper slope = model degrades more under difficulty pressure
+      </p>
+    </div>
+  )
+}
+
 export default function Heatmap({ includeDryRuns = false }) {
   const { data, loading, error } = useApi(() => api.heatmap(includeDryRuns), [includeDryRuns])
   const [taskType, setTaskType] = useState('')
@@ -133,6 +201,8 @@ export default function Heatmap({ includeDryRuns = false }) {
           <HeatmapGrid data={data} taskType={t} />
         </div>
       ))}
+
+      <DifficultyDegradation data={data} taskType={taskType} />
     </div>
   )
 }

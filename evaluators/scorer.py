@@ -84,7 +84,11 @@ def _score_extraction(pred: list[dict], gold: list[dict]) -> Scores:
     gold_tokens = Counter(_tokenize(" ".join(e.get("text", "") for e in gold)))
     token_f1 = _counter_f1(pred_tokens, gold_tokens)
 
-    return Scores(exact_match=entity_f1, token_f1=token_f1)
+    return Scores(
+        exact_match=entity_f1,
+        token_f1=token_f1,
+        extra={"entity_precision": round(precision, 6), "entity_recall": round(recall, 6)},
+    )
 
 
 def _score_classification(pred: str | list[str], gold: str | list[str]) -> Scores:

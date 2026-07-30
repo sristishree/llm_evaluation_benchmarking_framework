@@ -4,6 +4,7 @@ import RunBenchmark from './components/RunBenchmark'
 import RunHistory from './components/RunHistory'
 import ScoreBreakdown from './components/ScoreBreakdown'
 import Heatmap from './components/Heatmap'
+import DomainBreakdown from './components/DomainBreakdown'
 import ResponseViewer from './components/ResponseViewer'
 
 const TABS = [
@@ -11,10 +12,11 @@ const TABS = [
   { id: 'history',  label: 'Run History',     icon: '📋', component: RunHistory },
   { id: 'scores',   label: 'Score Breakdown', icon: '📈', component: ScoreBreakdown },
   { id: 'heatmap',  label: 'Heatmap',         icon: '🔥', component: Heatmap },
+  { id: 'domain',   label: 'Domain Analysis', icon: '🌐', component: DomainBreakdown },
   { id: 'viewer',   label: 'Response Viewer', icon: '🔍', component: ResponseViewer },
 ]
 
-const DRY_RUN_TABS = new Set(['history', 'scores', 'heatmap'])
+const DRY_RUN_TABS = new Set(['history', 'scores', 'heatmap', 'domain'])
 
 // ── Persistent run-progress toast shown when user is away from Run tab ────
 

@@ -267,6 +267,13 @@ class ResultsStore:
                 AVG(bert_score)             AS avg_bert_score,
                 AVG(exact_match)            AS avg_exact_match,
                 AVG(token_f1)               AS avg_token_f1,
+                SQRT(MAX(0, AVG(rouge_l * rouge_l)       - AVG(rouge_l) * AVG(rouge_l)))           AS std_rouge_l,
+                SQRT(MAX(0, AVG(bert_score * bert_score) - AVG(bert_score) * AVG(bert_score)))     AS std_bert_score,
+                SQRT(MAX(0, AVG(exact_match * exact_match) - AVG(exact_match) * AVG(exact_match))) AS std_exact_match,
+                SQRT(MAX(0, AVG(token_f1 * token_f1)     - AVG(token_f1) * AVG(token_f1)))         AS std_token_f1,
+                COUNT(CASE WHEN parse_error IS NOT NULL THEN 1 END) * 100.0 / COUNT(*) AS parse_failure_pct,
+                AVG(json_extract(scores_json, '$.entity_precision')) AS avg_entity_precision,
+                AVG(json_extract(scores_json, '$.entity_recall'))    AS avg_entity_recall,
                 SUM(total_tokens)           AS total_tokens,
                 SUM(estimated_cost_usd)     AS total_cost_usd,
                 AVG(latency_ms)             AS avg_latency_ms
@@ -274,6 +281,27 @@ class ResultsStore:
             {where}
             GROUP BY provider, model, task_type
             ORDER BY provider, task_type
+        """).fetchall()
+        return [dict(r) for r in rows]
+
+    def agg_by_domain(self, exclude_dry_runs: bool = True) -> list[dict]:
+        """Per-domain score breakdown — powers the domain performance chart."""
+        where = "WHERE dry_run = 0" if exclude_dry_runs else ""
+        rows = self._conn.execute(f"""
+            SELECT
+                provider, model, task_type, domain,
+                COUNT(*) AS n,
+                AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score)) AS avg_score,
+                SQRT(MAX(0,
+                    AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score) *
+                        COALESCE(rouge_l, token_f1, exact_match, bert_score))
+                    - AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score))
+                    * AVG(COALESCE(rouge_l, token_f1, exact_match, bert_score))
+                )) AS std_score
+            FROM run_results
+            {where}
+            GROUP BY provider, model, task_type, domain
+            ORDER BY domain, provider
         """).fetchall()
         return [dict(r) for r in rows]
 

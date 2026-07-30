@@ -39,4 +39,5 @@ export const api = {
   costQuality:  (dryRuns)    => get('/scores/cost-quality', dryRuns ? { include_dry_runs: true } : {}),
   results:      (params)     => get('/results', params),
   distribution: (dryRuns)   => get('/scores/distribution', dryRuns ? { include_dry_runs: true } : {}),
+  byDomain:     (dryRuns)   => get('/scores/by-domain',    dryRuns ? { include_dry_runs: true } : {}),
 }
