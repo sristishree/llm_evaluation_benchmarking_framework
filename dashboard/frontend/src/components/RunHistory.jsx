@@ -24,30 +24,176 @@ function ChevronIcon({ expanded }) {
   )
 }
 
-function RunDetail({ runId }) {
-  const { data: summary, loading } = useApi(() => api.runSummary(runId), [runId])
+const DIM_LABEL = {
+  judge_faithfulness:   'Faithfulness',
+  judge_coverage:       'Coverage',
+  judge_conciseness:    'Conciseness',
+  judge_completeness:   'Completeness',
+  judge_precision:      'Precision',
+  judge_accuracy:       'Accuracy',
+  judge_justifiability: 'Justifiability',
+}
 
-  if (loading) return (
+function ScorePill({ value, size = 'sm' }) {
+  if (value == null) return null
+  const pct = value * 100
+  const color = pct >= 70 ? 'bg-green-100 text-green-700'
+              : pct >= 40 ? 'bg-yellow-100 text-yellow-700'
+              :              'bg-red-100 text-red-700'
+  const cls = size === 'lg'
+    ? `inline-flex items-center text-sm font-bold px-2.5 py-1 rounded-full ${color}`
+    : `inline-flex items-center text-xs font-semibold px-2 py-0.5 rounded-full ${color}`
+  return <span className={cls}>{(value * 100).toFixed(0)}%</span>
+}
+
+function DimPill({ dimKey, value }) {
+  if (value == null) return null
+  const pct = value * 100
+  const color = pct >= 70 ? 'bg-purple-100 text-purple-700'
+              : pct >= 40 ? 'bg-yellow-100 text-yellow-700'
+              :              'bg-red-100 text-red-700'
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full ${color}`}>
+      {DIM_LABEL[dimKey] ?? dimKey.replace('judge_', '')}: {pct.toFixed(0)}%
+    </span>
+  )
+}
+
+function OutputBlock({ label, value }) {
+  if (value == null) return null
+  let display = value
+  if (typeof value !== 'string') {
+    try { display = JSON.stringify(value, null, 2) } catch { display = String(value) }
+  }
+  return (
+    <div>
+      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">{label}</p>
+      <pre className="text-xs text-gray-700 bg-gray-50 rounded-lg p-3 whitespace-pre-wrap font-mono max-h-36 overflow-y-auto leading-relaxed">
+        {display}
+      </pre>
+    </div>
+  )
+}
+
+function TaskRow({ row }) {
+  const [open, setOpen] = useState(false)
+  const dims = row.judge_dimensions
+    ? Object.entries(row.judge_dimensions).filter(([, v]) => v != null)
+    : []
+  const hasJudge = row.llm_judge_score != null
+
+  return (
+    <div className="border border-gray-200 rounded-xl overflow-hidden">
+      {/* Header — always visible */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-3 px-4 py-3 bg-white hover:bg-gray-50 transition-colors text-left"
+      >
+        <ChevronIcon expanded={open} />
+
+        {/* Task ID */}
+        <code className="text-xs font-mono text-gray-700 flex-1 truncate">{row.task_id}</code>
+
+        {/* Badges */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full">{row.task_type}</span>
+          {row.difficulty && (
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
+              row.difficulty === 'easy'   ? 'bg-green-100 text-green-700'
+            : row.difficulty === 'medium' ? 'bg-yellow-100 text-yellow-700'
+            :                              'bg-red-100 text-red-700'
+            }`}>{row.difficulty}</span>
+          )}
+          {hasJudge && <ScorePill value={row.llm_judge_score} />}
+          {row.rubric_overridden === 1 && (
+            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full font-medium">custom rubric</span>
+          )}
+        </div>
+      </button>
+
+      {/* Expanded detail */}
+      {open && (
+        <div className="border-t border-gray-100 bg-gray-50 px-4 py-4 space-y-4">
+          {/* Judge overall + dimensions */}
+          {hasJudge && (
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">LLM Judge</p>
+                <ScorePill value={row.llm_judge_score} size="lg" />
+              </div>
+              {dims.length > 0 && (
+                <div className="flex flex-wrap gap-1.5">
+                  {dims.map(([k, v]) => <DimPill key={k} dimKey={k} value={v} />)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Reasoning */}
+          {row.judge_reasoning && (
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Judge Reasoning</p>
+              <p className="text-xs text-gray-700 bg-white border border-gray-200 rounded-lg p-3 leading-relaxed">
+                {row.judge_reasoning}
+              </p>
+            </div>
+          )}
+
+          {/* Input / Expected / Prediction */}
+          <div className="grid grid-cols-1 gap-3">
+            <OutputBlock label="Expected" value={row.expected} />
+            <OutputBlock label="Model Output" value={row.parsed_output} />
+          </div>
+
+          {row.parse_error && (
+            <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
+              <span className="font-semibold">Parse error:</span> {row.parse_error}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function RunDetail({ runId }) {
+  const { data: summary, loading: summaryLoading } = useApi(() => api.runSummary(runId), [runId])
+  const { data: tasks,   loading: tasksLoading }   = useApi(() => api.results({ run_id: runId, limit: 1000 }), [runId])
+
+  if (summaryLoading || tasksLoading) return (
     <div className="flex items-center gap-2 text-sm text-gray-500 py-1">
       <div className="w-4 h-4 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin" />
       Loading…
     </div>
   )
 
-  if (!summary || !Object.keys(summary).length) return (
-    <p className="text-sm text-gray-400">No summary available.</p>
-  )
-
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-        <MetricTile label="Tasks"       value={fmt(summary.task_count)} />
-        <MetricTile label="Tokens"      value={fmt(summary.total_tokens)} />
-        <MetricTile label="Cost (USD)"  value={summary.total_cost_usd  != null ? `$${summary.total_cost_usd.toFixed(4)}` : '—'} />
-        <MetricTile label="Avg Latency" value={summary.avg_latency_ms  != null ? `${Math.round(summary.avg_latency_ms)} ms` : '—'} />
-        <MetricTile label="LLM Judge"   value={summary.avg_llm_judge   != null ? summary.avg_llm_judge.toFixed(3) : '—'} />
-      </div>
-      {summary.started_at && (
+    <div className="space-y-5">
+      {/* Summary tiles */}
+      {summary && Object.keys(summary).length > 0 && (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <MetricTile label="Tasks"       value={fmt(summary.task_count)} />
+          <MetricTile label="Tokens"      value={fmt(summary.total_tokens)} />
+          <MetricTile label="Cost (USD)"  value={summary.total_cost_usd != null ? `$${summary.total_cost_usd.toFixed(4)}` : '—'} />
+          <MetricTile label="Avg Latency" value={summary.avg_latency_ms != null ? `${Math.round(summary.avg_latency_ms)} ms` : '—'} />
+          <MetricTile label="LLM Judge"   value={summary.avg_llm_judge  != null ? summary.avg_llm_judge.toFixed(3) : '—'} />
+        </div>
+      )}
+
+      {/* Per-task results */}
+      {tasks?.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Task Results ({tasks.length})
+          </p>
+          <div className="space-y-1.5 max-h-[60vh] overflow-y-auto pr-1">
+            {tasks.map(row => <TaskRow key={row.id ?? row.task_id} row={row} />)}
+          </div>
+        </div>
+      )}
+
+      {summary?.started_at && (
         <p className="text-xs text-gray-400">
           Started: {new Date(summary.started_at).toLocaleString()} ·
           Finished: {new Date(summary.finished_at).toLocaleString()}
@@ -131,11 +277,8 @@ export default function RunHistory({ includeDryRuns = false }) {
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
                         <ChevronIcon expanded={expanded} />
-                        <code
-                          className="text-xs font-mono bg-gray-100 px-2 py-0.5 rounded tracking-wide"
-                          title={run.run_id}
-                        >
-                          {run.run_id}
+                        <code className="text-xs font-mono bg-gray-100 px-2 py-0.5 rounded tracking-wide" title={run.run_id}>
+                          {run.run_id.slice(0, 8)}…
                         </code>
                       </div>
                     </td>
@@ -148,9 +291,7 @@ export default function RunHistory({ includeDryRuns = false }) {
                       <div>{new Date(run.created_at).toLocaleDateString()}</div>
                       <div className="text-xs text-gray-400 mt-0.5">{new Date(run.created_at).toLocaleTimeString()}</div>
                       {run.is_dry_run === 1 && (
-                        <span className="inline-block mt-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">
-                          dry run
-                        </span>
+                        <span className="inline-block mt-1 text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">dry run</span>
                       )}
                     </td>
                     <td className="px-4 py-3 text-gray-400 max-w-xs truncate">{run.notes || '—'}</td>

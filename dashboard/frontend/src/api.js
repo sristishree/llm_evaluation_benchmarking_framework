@@ -40,4 +40,7 @@ export const api = {
   results:      (params)     => get('/results', params),
   distribution: (dryRuns)   => get('/scores/distribution', dryRuns ? { include_dry_runs: true } : {}),
   byDomain:     (dryRuns)   => get('/scores/by-domain',    dryRuns ? { include_dry_runs: true } : {}),
+  rubric:         (params)    => get('/rubric', params),
+  judgePreview:   (params)    => post('/judge/preview', params),
+  judgeCalibrate: (params)    => post('/judge/calibrate', params),
 }

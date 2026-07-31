@@ -9,6 +9,7 @@ The React dev server (port 5173) proxies /api/* to this process.
 from __future__ import annotations
 
 import json
+import logging
 import random
 import sys
 import threading
@@ -24,6 +25,15 @@ from pydantic import BaseModel
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from storage.db import ResultsStore
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+# Show DEBUG logs from our own code but keep third-party libs at INFO
+logging.getLogger("evaluators").setLevel(logging.DEBUG)
+logging.getLogger("storage").setLevel(logging.DEBUG)
 
 app = FastAPI(title="LLM Evaluation Benchmark API", version="0.1.0")
 
@@ -165,6 +175,67 @@ def _build_task_bank_stats() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Default rubric for a task type (powers the rubric preview in the UI)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/rubric")
+def get_default_rubric(
+    dataset_file: str | None = Query(None),
+    task_type:    str | None = Query(None),
+) -> dict[str, Any]:
+    """Return the default rubric string for a specific dataset file or task type.
+
+    Prefer dataset_file (exact file) over task_type (first matching file).
+    """
+    from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
+
+    TYPE_CLS = {
+        "classification": ClassificationTask,
+        "qa":             QATask,
+        "summarization":  SummarizationTask,
+        "extraction":     ExtractionTask,
+    }
+
+    def _rubric_from_path(path: Path) -> dict | None:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    cls = TYPE_CLS.get(data.get("task_type", ""))
+                    if cls:
+                        task = cls.model_validate(data)
+                        return {"rubric": task.rubric, "task_type": data.get("task_type")}
+                except Exception:
+                    continue
+        return None
+
+    if dataset_file:
+        path = _TASK_BANK / dataset_file
+        if not path.exists():
+            raise HTTPException(status_code=404, detail=f"Dataset file not found: {dataset_file}")
+        result = _rubric_from_path(path)
+        if result:
+            return {**result, "dataset_file": dataset_file}
+        raise HTTPException(status_code=404, detail=f"No valid tasks in: {dataset_file}")
+
+    if task_type:
+        if task_type not in TYPE_CLS:
+            raise HTTPException(status_code=404, detail=f"Unknown task type: {task_type}")
+        for pat in _TASK_TYPE_GLOBS.get(task_type, []):
+            for path in sorted(_TASK_BANK.glob(pat)):
+                if path.name in _COMBINED_FILES:
+                    continue
+                result = _rubric_from_path(path)
+                if result:
+                    return {**result, "dataset_file": path.name}
+
+    raise HTTPException(status_code=400, detail="Provide dataset_file or task_type")
+
+
+# ---------------------------------------------------------------------------
 # Run list + summary (read-only, from DB)
 # ---------------------------------------------------------------------------
 
@@ -206,14 +277,19 @@ class DatasetSelection(BaseModel):
 
 
 class RunRequest(BaseModel):
-    provider:       str
-    model:          str
-    datasets:       list[DatasetSelection]
-    dry_run:        bool = False
-    notes:          str | None = None
-    use_judge:      bool = False
-    judge_provider: str | None = None
-    judge_model:    str | None = None
+    provider:              str
+    model:                 str
+    datasets:              list[DatasetSelection]
+    dry_run:               bool = False
+    notes:                 str | None = None
+    # LLM-as-Judge settings
+    use_judge:             bool = False
+    judge_provider:        str | None = None
+    judge_model:           str | None = None
+    mitigate_position_bias: bool = False
+    # Per-dataset rubric overrides: dataset_file → rubric string.
+    # Applies only for this run — not persisted anywhere.
+    rubric_overrides:      dict[str, str] = {}
 
 
 @app.post("/api/runs", status_code=202)
@@ -314,11 +390,232 @@ def query_results(
     limit:     int        = Query(200, le=1000),
 ) -> list[dict[str, Any]]:
     with _store() as s:
-        return s.query(
+        rows = s.query(
             provider=provider, model=model, task_type=task_type,
             difficulty=difficulty, domain=domain, run_id=run_id,
             dry_run=False, limit=limit,
         )
+    # Parse per-dimension judge scores from scores_json and surface them
+    # as a structured dict so the frontend doesn't need to parse JSON blobs.
+    for row in rows:
+        scores_blob = row.get("scores_json")
+        if scores_blob:
+            try:
+                data = json.loads(scores_blob)
+                dims = {
+                    k: v for k, v in data.items()
+                    if k.startswith("judge_") and isinstance(v, (int, float))
+                }
+                if dims:
+                    row["judge_dimensions"] = dims
+                reasoning = data.get("judge_reasoning")
+                if reasoning:
+                    row["judge_reasoning"] = reasoning
+            except Exception:
+                pass
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# LLM-as-Judge: rubric preview
+# ---------------------------------------------------------------------------
+
+class PreviewRequest(BaseModel):
+    dataset_files:   list[str]        # one entry per selected dataset
+    limit_per_file:  int = 1
+    rubric_overrides: dict[str, str] = {}   # dataset_file → rubric string
+
+
+@app.post("/api/judge/preview")
+def preview_judge(req: PreviewRequest) -> list[dict[str, Any]]:
+    """Return judge prompt previews for all selected datasets without any LLM call."""
+    from evaluators.llm_judge import build_preview
+    from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
+
+    TYPE_CLS = {
+        "classification": ClassificationTask,
+        "qa":             QATask,
+        "summarization":  SummarizationTask,
+        "extraction":     ExtractionTask,
+    }
+
+    previews: list[dict] = []
+
+    for dataset_file in req.dataset_files:
+        path = _TASK_BANK / dataset_file
+        if not path.exists():
+            continue
+        sampled: list = []
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    cls = TYPE_CLS.get(data.get("task_type", ""))
+                    if cls:
+                        sampled.append(cls.model_validate(data))
+                except Exception:
+                    continue
+                if len(sampled) >= req.limit_per_file:
+                    break
+        rubric_override = req.rubric_overrides.get(dataset_file)
+        for t in sampled:
+            p = build_preview(t, rubric_override=rubric_override)
+            p["dataset_file"] = dataset_file
+            previews.append(p)
+
+    return previews
+
+
+# ---------------------------------------------------------------------------
+# LLM-as-Judge: calibration against human scores
+# ---------------------------------------------------------------------------
+
+class HumanScore(BaseModel):
+    task_id: str
+    score:   float  # 0-10 scale
+
+
+class CalibrateRequest(BaseModel):
+    run_id:                str
+    human_scores:          list[HumanScore]
+    judge_provider:        str | None = None
+    judge_model:           str | None = None
+    rubric_override:       str | None = None
+    mitigate_position_bias: bool = False
+
+
+@app.post("/api/judge/calibrate")
+def calibrate_judge(req: CalibrateRequest) -> dict[str, Any]:
+    """Compare LLM judge scores against human ratings on a small held-out slice.
+
+    If judge_model is provided the judge is re-run on those tasks.
+    Otherwise existing llm_judge_score values from the run are used.
+
+    Returns a CalibrationReport and per-task deltas.  A Pearson r < 0.7 or
+    |bias| > 0.1 suggests the rubric needs refinement before scaling up.
+    """
+    from evaluators.calibrate_judge import calibrate, CalibrationReport
+    from models.result import GenerationConfig, RunResult
+    from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
+
+    human_map: dict[str, float] = {
+        hs.task_id: hs.score / 10.0 for hs in req.human_scores
+    }
+    task_ids = list(human_map.keys())
+
+    with _store() as s:
+        db_rows = {
+            r["task_id"]: r
+            for r in s.query(run_id=req.run_id, limit=10_000)
+            if r["task_id"] in human_map
+        }
+
+    judge_scores_map: dict[str, float] = {}
+
+    if req.judge_model:
+        from evaluators.llm_judge import LLMJudge
+        import os
+
+        TYPE_CLS = {
+            "classification": ClassificationTask,
+            "qa":             QATask,
+            "summarization":  SummarizationTask,
+            "extraction":     ExtractionTask,
+        }
+
+        judge = LLMJudge(
+            model=req.judge_model,
+            api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+            api_key=os.environ.get("LITELLM_API_KEY"),
+            mitigate_position_bias=req.mitigate_position_bias,
+        )
+
+        # Find tasks from task bank to reconstruct full task objects
+        tasks_by_id = _find_tasks_by_ids(set(task_ids), TYPE_CLS)
+
+        for tid, row in db_rows.items():
+            task = tasks_by_id.get(tid)
+            if task is None or not row.get("parsed_output"):
+                continue
+            try:
+                parsed = json.loads(row["parsed_output"])
+            except Exception:
+                parsed = row.get("parsed_output")
+            result = RunResult(
+                task_id=tid,
+                task_type=row["task_type"],
+                provider=row["provider"],
+                model=row["model"],
+                generation_config=GenerationConfig(
+                    model=row["model"],
+                    temperature=row.get("temperature", 0.0),
+                    max_tokens=row.get("max_tokens", 1024),
+                ),
+                raw_output=row.get("raw_output") or "",
+                parsed_output=parsed,
+                tokens_used={"prompt": 0, "completion": 0, "total": 0},
+                latency_ms=0.0,
+            )
+            jr = judge.judge(result, task, rubric_override=req.rubric_override)
+            if jr is not None:
+                judge_scores_map[tid] = jr.overall
+    else:
+        for tid, row in db_rows.items():
+            existing = row.get("llm_judge_score")
+            if existing is not None:
+                judge_scores_map[tid] = float(existing)
+
+    # Only include task_ids where we have both judge and human scores
+    common = [tid for tid in task_ids if tid in judge_scores_map]
+    if not common:
+        raise HTTPException(
+            status_code=422,
+            detail="No matching scored results found. Provide a run_id with judge scores "
+                   "or a judge_model to re-score."
+        )
+
+    j_scores = [judge_scores_map[tid] for tid in common]
+    h_scores  = [human_map[tid] for tid in common]
+
+    report = calibrate(j_scores, h_scores)
+
+    per_task = [
+        {
+            "task_id":     tid,
+            "judge_score": round(judge_scores_map[tid], 4),
+            "human_score": round(human_map[tid], 4),
+            "delta":       round(judge_scores_map[tid] - human_map[tid], 4),
+        }
+        for tid in common
+    ]
+
+    return {**report.to_dict(), "per_task": per_task}
+
+
+def _find_tasks_by_ids(task_ids: set[str], type_cls: dict) -> dict:
+    """Scan all task bank JSONL files for the given task_ids."""
+    found: dict = {}
+    for path in _TASK_BANK.glob("*.jsonl"):
+        if not (task_ids - set(found)):
+            break
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                    tid = data.get("task_id")
+                    if tid in task_ids and tid not in found:
+                        cls = type_cls.get(data.get("task_type", ""))
+                        if cls:
+                            found[tid] = cls.model_validate(data)
+                except Exception:
+                    continue
+    return found
 
 
 # ---------------------------------------------------------------------------
@@ -332,8 +629,8 @@ def _set_job(run_id: str, **kwargs: Any) -> None:
 
 def _execute_run(run_id: str, req: RunRequest) -> None:
     try:
-        tasks = _load_tasks(req.datasets)
-        _set_job(run_id, state="running", total=len(tasks))
+        tasks_with_src = _load_tasks(req.datasets)  # list of (task, source_file)
+        _set_job(run_id, state="running", total=len(tasks_with_src))
 
         from models.provider_config import ProviderConfig
         from models.result import Scores, ScoredResult
@@ -351,15 +648,23 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
                 model=req.judge_model,
                 api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
                 api_key=os.environ.get("LITELLM_API_KEY"),
+                mitigate_position_bias=req.mitigate_position_bias,
             )
 
-        for i, task in enumerate(tasks):
+        for i, (task, source_file) in enumerate(tasks_with_src):
             result = run_task(task, config, dry_run=req.dry_run)
             scores = compute_scores(result, task)
             if judge is not None:
-                judge_score = judge.judge(result, task)
-                if judge_score is not None:
-                    scores = scores.model_copy(update={"llm_judge_score": judge_score})
+                rubric_override = req.rubric_overrides.get(source_file) if req.rubric_overrides else None
+                jr = judge.judge(result, task, rubric_override=rubric_override)
+                if jr is not None:
+                    dim_extra = {f"judge_{k}": v for k, v in jr.dimensions.items()}
+                    scores = scores.model_copy(update={
+                        "llm_judge_score":   jr.overall,
+                        "rubric_overridden": jr.rubric_overridden,
+                        "judge_reasoning":   jr.reasoning or None,
+                        "extra": {**scores.extra, **dim_extra},
+                    })
             scored.append(ScoredResult(
                 run_id=run_id,
                 result=result,
@@ -387,7 +692,8 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
                  finished_at=datetime.now(tz=timezone.utc).isoformat())
 
 
-def _load_tasks(selections: list[DatasetSelection]) -> list:
+def _load_tasks(selections: list[DatasetSelection]) -> list[tuple]:
+    """Return a list of (task, source_file) pairs."""
     from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
 
     TYPE_CLS = {
@@ -397,7 +703,7 @@ def _load_tasks(selections: list[DatasetSelection]) -> list:
         "extraction":     ExtractionTask,
     }
 
-    all_tasks: list = []
+    all_tasks: list[tuple] = []
     for sel in selections:
         path = _TASK_BANK / sel.file
         if not path.exists():
@@ -421,7 +727,7 @@ def _load_tasks(selections: list[DatasetSelection]) -> list:
                     continue
         if len(pool) > sel.limit:
             pool = random.sample(pool, sel.limit)
-        all_tasks.extend(pool)
+        all_tasks.extend((task, sel.file) for task in pool)
 
     if not all_tasks:
         raise ValueError(

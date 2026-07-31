@@ -169,9 +169,21 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
   const [model, setModel]           = useState('')
   const [dryRun, setDryRun]         = useState(false)
   const [notes, setNotes]           = useState('')
-  const [useJudge, setUseJudge]     = useState(false)
-  const [judgeProvider, setJudgeProvider] = useState('')
-  const [judgeModel, setJudgeModel] = useState('')
+  const [useJudge, setUseJudge]               = useState(false)
+  const [judgeProvider, setJudgeProvider]     = useState('')
+  const [judgeModel, setJudgeModel]           = useState('')
+  const [mitigatePosBias, setMitigatePosBias] = useState(false)
+  // datasetRubrics: file → { name, rubric }  (defaults fetched per enabled dataset)
+  const [datasetRubrics, setDatasetRubrics]   = useState({})
+  const [showRubricModal, setShowRubricModal] = useState(false)
+  // editingRubrics: draft state inside the modal (file → text), discarded on ×
+  const [editingRubrics, setEditingRubrics]   = useState({})
+  // activeOverrides: committed overrides (file → text), used for submit/preview
+  const [activeOverrides, setActiveOverrides] = useState({})
+  const [previewData, setPreviewData]         = useState(null)
+  const [previewLoading, setPreviewLoading]   = useState(false)
+  const [previewErr, setPreviewErr]           = useState(null)
+  const [showPreview, setShowPreview]         = useState(false)
 
   // Task type + per-dataset selections
   const [taskType, setTaskType]     = useState('classification')
@@ -236,6 +248,35 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
 
   const datasetsForType = taskBank?.[taskType] ?? []
 
+  // Stable string key of enabled files — safe to use as useEffect dependency
+  const enabledFilesKey = useMemo(() => {
+    return datasetsForType
+      .filter(ds => selections[ds.file]?.enabled)
+      .map(ds => ds.file)
+      .sort()
+      .join(',')
+  }, [datasetsForType, selections])
+
+  // Fetch rubric for each enabled dataset whenever selection changes
+  useEffect(() => {
+    if (!useJudge || !enabledFilesKey) {
+      setDatasetRubrics({})
+      return
+    }
+    const enabled = datasetsForType.filter(ds => selections[ds.file]?.enabled)
+    Promise.all(
+      enabled.map(ds =>
+        api.rubric({ dataset_file: ds.file })
+          .then(d => ({ file: ds.file, name: ds.name, rubric: d.rubric }))
+          .catch(() => null)
+      )
+    ).then(results => {
+      const map = {}
+      results.filter(Boolean).forEach(r => { map[r.file] = { name: r.name, rubric: r.rubric } })
+      setDatasetRubrics(map)
+    })
+  }, [enabledFilesKey, useJudge])
+
   const totalSelected = datasetsForType.reduce((sum, ds) => {
     const s = selections[ds.file]
     return sum + (s?.enabled ? s.limit : 0)
@@ -244,6 +285,53 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
   const isRunning = status && (status.state === 'loading' || status.state === 'running')
   const isDone    = status?.state === 'done'
   const isError   = status?.state === 'error'
+
+  const numOverrides = Object.keys(activeOverrides).length
+
+  function openRubricModal() {
+    // Pre-fill editing state: start from activeOverrides, fall back to fetched defaults
+    const init = {}
+    Object.entries(datasetRubrics).forEach(([file, { rubric }]) => {
+      init[file] = activeOverrides[file] ?? rubric
+    })
+    setEditingRubrics(init)
+    setShowRubricModal(true)
+  }
+
+  function commitRubrics() {
+    // Persist only the entries that differ from the task-bank default
+    const overrides = {}
+    Object.entries(editingRubrics).forEach(([file, text]) => {
+      const def = datasetRubrics[file]?.rubric ?? ''
+      if (text.trim() && text.trim() !== def.trim()) {
+        overrides[file] = text.trim()
+      }
+    })
+    setActiveOverrides(overrides)
+    setShowRubricModal(false)
+  }
+
+  async function handlePreview() {
+    const enabledFiles = datasetsForType
+      .filter(ds => selections[ds.file]?.enabled)
+      .map(ds => ds.file)
+    if (!enabledFiles.length) return
+    setPreviewLoading(true)
+    setPreviewErr(null)
+    try {
+      const data = await api.judgePreview({
+        dataset_files:   enabledFiles,
+        limit_per_file:  1,
+        rubric_overrides: activeOverrides,
+      })
+      setPreviewData(data)
+      setShowPreview(true)
+    } catch (err) {
+      setPreviewErr(err.message)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -261,9 +349,11 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
       if (!datasets.length) throw new Error('Select at least one dataset.')
       const { run_id } = await api.startRun({
         provider, model, datasets, dry_run: dryRun, notes: notes || null,
-        use_judge: useJudge && !dryRun,
-        judge_provider: useJudge && !dryRun ? judgeProvider : null,
-        judge_model:    useJudge && !dryRun ? judgeModel    : null,
+        use_judge:              useJudge && !dryRun,
+        judge_provider:         useJudge && !dryRun ? judgeProvider   : null,
+        judge_model:            useJudge && !dryRun ? judgeModel      : null,
+        mitigate_position_bias: useJudge && !dryRun ? mitigatePosBias : false,
+        rubric_overrides:       useJudge && !dryRun ? activeOverrides : {},
       })
       setActiveRunId(run_id)
     } catch (err) {
@@ -345,7 +435,7 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
               className="mt-0.5 w-4 h-4 accent-blue-500" />
             <span className="text-sm text-gray-700">
               Dry run
-              <span className="block text-xs text-gray-400 mt-0.5">No API calls — placeholder responses</span>
+              <span className="block text-xs text-gray-400 mt-0.5">No API calls - placeholder responses</span>
             </span>
           </label>
 
@@ -355,12 +445,25 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
               disabled={!!isRunning || dryRun} className="mt-0.5 w-4 h-4 accent-purple-500" />
             <span className="text-sm text-gray-700">
               LLM-as-Judge
-              <span className="block text-xs text-gray-400 mt-0.5">Score outputs with a judge model</span>
+              <span className="block text-xs text-gray-400 mt-0.5">
+                Score each output on rubric dimensions (faithfulness, coverage, conciseness…)
+              </span>
             </span>
           </label>
 
           {useJudge && !dryRun && (
-            <div className="ml-6 space-y-2">
+            <div className="ml-6 space-y-3">
+
+              {/* Self-enhancement bias warning */}
+              {judgeProvider && judgeProvider === provider && (
+                <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+                  <span className="font-semibold">Self-enhancement bias risk:</span> judge and
+                  evaluand use the same provider ({provider}). Use a different judge provider
+                  where possible for more objective scores.
+                </div>
+              )}
+
+              {/* Judge provider + model */}
               <div>
                 <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Judge Provider</label>
                 <select value={judgeProvider} onChange={e => setJudgeProvider(e.target.value)} disabled={!!isRunning}
@@ -375,6 +478,45 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
                   {judgeModelOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
                 </select>
               </div>
+
+              {/* Position-bias mitigation */}
+              <label className="flex items-start gap-2 cursor-pointer">
+                <input type="checkbox" checked={mitigatePosBias} onChange={e => setMitigatePosBias(e.target.checked)}
+                  disabled={!!isRunning} className="mt-0.5 w-4 h-4 accent-purple-400" />
+                <span className="text-xs text-gray-600">
+                  Mitigate position bias
+                  <span className="block text-gray-400 mt-0.5">
+                    Runs judge twice with expected/model order swapped and averages — doubles judge API cost
+                  </span>
+                </span>
+              </label>
+
+              {/* Evaluation Rubric — compact row, opens modal */}
+              <div className="flex items-center justify-between rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+                <div>
+                  <p className="text-xs font-semibold text-gray-600">Evaluation Rubric</p>
+                  <p className="text-xs text-gray-400 mt-0.5">
+                    {numOverrides > 0
+                      ? `${numOverrides} dataset${numOverrides > 1 ? 's' : ''} customized`
+                      : 'Using task bank defaults'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={openRubricModal}
+                  className="text-xs font-semibold text-purple-600 hover:text-purple-800 whitespace-nowrap ml-3"
+                >
+                  View & Customize ↗
+                </button>
+              </div>
+
+              {/* Preview button */}
+              <button type="button" onClick={handlePreview}
+                disabled={previewLoading || !!isRunning || !datasetsForType.some(ds => selections[ds.file]?.enabled)}
+                className="w-full border border-purple-300 text-purple-700 bg-purple-50 hover:bg-purple-100 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold py-2 rounded-lg transition-colors">
+                {previewLoading ? 'Loading preview…' : 'Preview Judge Prompts'}
+              </button>
+              {previewErr && <p className="text-xs text-red-600">{previewErr}</p>}
             </div>
           )}
 
@@ -466,6 +608,157 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
           )}
         </div>
       </form>
+
+      {/* Rubric modal */}
+      {showRubricModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[85vh]">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 shrink-0">
+              <div>
+                <h2 className="text-base font-bold text-gray-900">Evaluation Rubric</h2>
+                <p className="text-xs text-gray-400 mt-0.5">Edit any rubric below — changes apply to this run only and are not saved.</p>
+              </div>
+              <button onClick={() => setShowRubricModal(false)}
+                className="text-gray-400 hover:text-gray-700 text-2xl leading-none font-light ml-4">×</button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-6">
+              {Object.keys(datasetRubrics).length === 0 ? (
+                <p className="text-sm text-gray-400 italic">
+                  {enabledFilesKey ? 'Loading rubrics…' : 'No datasets selected.'}
+                </p>
+              ) : (
+                Object.entries(datasetRubrics).map(([file, { name, rubric: defaultRubric }]) => {
+                  const current = editingRubrics[file] ?? defaultRubric
+                  const changed = current.trim() !== defaultRubric.trim()
+                  return (
+                    <div key={file} className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-semibold text-gray-600 uppercase tracking-wide">
+                          {name}
+                          {changed && (
+                            <span className="ml-2 normal-case font-normal text-purple-600">— customized</span>
+                          )}
+                        </p>
+                        {changed && (
+                          <button
+                            type="button"
+                            onClick={() => setEditingRubrics(prev => ({ ...prev, [file]: defaultRubric }))}
+                            className="text-xs text-gray-400 hover:text-gray-600"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
+                      <textarea
+                        rows={7}
+                        value={current}
+                        onChange={e => setEditingRubrics(prev => ({ ...prev, [file]: e.target.value }))}
+                        disabled={!!isRunning}
+                        className={`w-full border rounded-lg px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 disabled:opacity-50 resize-y leading-relaxed ${
+                          changed
+                            ? 'border-purple-300 focus:ring-purple-500 bg-purple-50/30'
+                            : 'border-gray-200 focus:ring-gray-400'
+                        }`}
+                      />
+                    </div>
+                  )
+                })
+              )}
+            </div>
+
+            <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 shrink-0">
+              <button
+                type="button"
+                onClick={() => setEditingRubrics(
+                  Object.fromEntries(Object.entries(datasetRubrics).map(([f, { rubric }]) => [f, rubric]))
+                )}
+                className="text-sm text-gray-400 hover:text-gray-600"
+              >
+                Reset all
+              </button>
+              <button type="button" onClick={commitRubrics}
+                className="bg-purple-600 hover:bg-purple-700 text-white text-sm font-semibold px-6 py-2 rounded-lg transition-colors">
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Preview modal */}
+      {showPreview && previewData && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 pt-16 px-4 pb-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-3xl">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <div>
+                <h2 className="text-base font-bold text-gray-900">Judge Prompt Preview</h2>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  First {previewData.length} task{previewData.length !== 1 ? 's' : ''} — no LLM call made
+                </p>
+              </div>
+              <button onClick={() => setShowPreview(false)}
+                className="text-gray-400 hover:text-gray-700 text-2xl leading-none font-light">×</button>
+            </div>
+
+            <div className="divide-y divide-gray-100 max-h-[70vh] overflow-y-auto">
+              {previewData.map((p) => (
+                <div key={p.task_id} className="px-6 py-5 space-y-3">
+                  {/* Task header */}
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-sm text-gray-800">{p.task_id}</span>
+                    <span className="text-xs bg-gray-100 text-gray-500 px-2 py-0.5 rounded">{p.task_type}</span>
+                    {p.rubric_overridden && (
+                      <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded font-semibold">
+                        custom rubric
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Effective rubric */}
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                      Effective Rubric {p.rubric_overridden ? '(overridden)' : '(task bank default)'}
+                    </p>
+                    <p className="text-xs text-gray-700 bg-gray-50 rounded-lg p-3 leading-relaxed">{p.rubric}</p>
+                  </div>
+
+                  {/* Dimensions */}
+                  {p.dimensions?.length > 0 && (
+                    <div>
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
+                        Scoring Dimensions ({p.dimensions.length})
+                      </p>
+                      <ul className="space-y-1">
+                        {p.dimensions.map(d => (
+                          <li key={d.key} className="text-xs text-gray-700 bg-purple-50 rounded-lg px-3 py-2">
+                            <span className="font-semibold text-purple-700">{d.label}:</span> {d.prompt}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Input preview */}
+                  <div>
+                    <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Input Preview</p>
+                    <pre className="text-xs text-gray-600 bg-gray-50 rounded-lg p-3 whitespace-pre-wrap overflow-x-auto font-mono max-h-28">
+                      {p.input_preview}
+                    </pre>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="px-6 py-4 border-t border-gray-100 flex justify-end">
+              <button onClick={() => setShowPreview(false)}
+                className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium px-5 py-2 rounded-lg transition-colors">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
