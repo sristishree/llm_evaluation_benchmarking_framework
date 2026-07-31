@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS run_results (
     exact_match        REAL,
     token_f1           REAL,
     llm_judge_score    REAL,
+    rubric_overridden  INTEGER NOT NULL DEFAULT 0,
     scores_json        TEXT,
     UNIQUE (task_id, provider, model, timestamp)
 );
@@ -100,6 +101,10 @@ class ResultsStore:
         existing = {row[1] for row in self._conn.execute("PRAGMA table_info(run_results)")}
         if "expected" not in existing:
             self._conn.execute("ALTER TABLE run_results ADD COLUMN expected TEXT")
+        if "rubric_overridden" not in existing:
+            self._conn.execute(
+                "ALTER TABLE run_results ADD COLUMN rubric_overridden INTEGER NOT NULL DEFAULT 0"
+            )
 
     # -----------------------------------------------------------------------
     # Write
@@ -142,6 +147,7 @@ class ResultsStore:
             "exact_match":        s.exact_match,
             "token_f1":           s.token_f1,
             "llm_judge_score":    s.llm_judge_score,
+            "rubric_overridden":  int(s.rubric_overridden),
             "scores_json":        json.dumps(
                 {**s.model_dump(exclude={"extra"}), **s.extra}
             ),
@@ -185,8 +191,9 @@ class ResultsStore:
             "bert_score":      scores.bert_score,
             "exact_match":     scores.exact_match,
             "token_f1":        scores.token_f1,
-            "llm_judge_score": scores.llm_judge_score,
-            "scores_json":     json.dumps(
+            "llm_judge_score":   scores.llm_judge_score,
+            "rubric_overridden": int(scores.rubric_overridden),
+            "scores_json":       json.dumps(
                 {**scores.model_dump(exclude={"extra"}), **scores.extra}
             ),
         }
@@ -267,6 +274,8 @@ class ResultsStore:
                 AVG(bert_score)             AS avg_bert_score,
                 AVG(exact_match)            AS avg_exact_match,
                 AVG(token_f1)               AS avg_token_f1,
+                AVG(llm_judge_score)        AS avg_llm_judge_score,
+                SUM(rubric_overridden)      AS n_rubric_overridden,
                 SQRT(MAX(0, AVG(rouge_l * rouge_l)       - AVG(rouge_l) * AVG(rouge_l)))           AS std_rouge_l,
                 SQRT(MAX(0, AVG(bert_score * bert_score) - AVG(bert_score) * AVG(bert_score)))     AS std_bert_score,
                 SQRT(MAX(0, AVG(exact_match * exact_match) - AVG(exact_match) * AVG(exact_match))) AS std_exact_match,

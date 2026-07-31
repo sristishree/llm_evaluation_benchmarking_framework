@@ -40,10 +40,18 @@ class RunResult(BaseModel):
 
 
 class Scores(BaseModel):
-    """Metric scores produced by the scoring layer (Phase 4).
+    """Metric scores produced by the scoring layer.
 
     All fields are optional — a result can be saved before scoring and
     updated later without re-running inference.
+
+    LLM-judge fields
+    ----------------
+    llm_judge_score   Overall judge score normalised to [0, 1].
+    rubric_overridden True when a user-supplied rubric replaced the task-bank default.
+                      Flagged on the leaderboard so results remain interpretable.
+    extra             Stores per-dimension judge scores as ``judge_{dim_key}`` keys,
+                      e.g. ``{"judge_faithfulness": 0.8, "judge_coverage": 0.7}``.
     """
     rouge_1: float | None = None
     rouge_2: float | None = None
@@ -52,6 +60,8 @@ class Scores(BaseModel):
     exact_match: float | None = None
     token_f1: float | None = None
     llm_judge_score: float | None = None
+    rubric_overridden: bool = False
+    judge_reasoning: str | None = None
     extra: dict[str, float] = Field(default_factory=dict)
 
 

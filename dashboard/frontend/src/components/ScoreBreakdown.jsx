@@ -11,12 +11,13 @@ import { Spinner, ErrorCard, EmptyState, SectionHeader, Select } from './ui'
 const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4']
 
 const METRICS = [
-  { value: 'avg_rouge_1',     label: 'ROUGE-1' },
-  { value: 'avg_rouge_2',     label: 'ROUGE-2' },
-  { value: 'avg_rouge_l',     label: 'ROUGE-L' },
-  { value: 'avg_bert_score',  label: 'BERTScore' },
-  { value: 'avg_exact_match', label: 'Exact Match' },
-  { value: 'avg_token_f1',    label: 'Token F1' },
+  { value: 'avg_rouge_1',          label: 'ROUGE-1' },
+  { value: 'avg_rouge_2',          label: 'ROUGE-2' },
+  { value: 'avg_rouge_l',          label: 'ROUGE-L' },
+  { value: 'avg_bert_score',       label: 'BERTScore' },
+  { value: 'avg_exact_match',      label: 'Exact Match' },
+  { value: 'avg_token_f1',         label: 'Token F1' },
+  { value: 'avg_llm_judge_score',  label: 'LLM Judge' },
 ]
 
 function ParseFailBadge({ pct }) {
@@ -37,7 +38,8 @@ const TABLE_COLS = [
   { key: 'avg_rouge_l',         label: 'ROUGE-L',        render: r => r.avg_rouge_l?.toFixed(3)     ?? '—', sortable: true },
   { key: 'avg_bert_score',      label: 'BERTScore',      render: r => r.avg_bert_score?.toFixed(3)  ?? '—', sortable: true },
   { key: 'avg_exact_match',     label: 'Exact Match',    render: r => r.avg_exact_match?.toFixed(3) ?? '—', sortable: true },
-  { key: 'avg_token_f1',        label: 'Token F1',       render: r => r.avg_token_f1?.toFixed(3)    ?? '—', sortable: true },
+  { key: 'avg_token_f1',         label: 'Token F1',       render: r => r.avg_token_f1?.toFixed(3)         ?? '—', sortable: true },
+  { key: 'avg_llm_judge_score',  label: 'LLM Judge',      render: r => r.avg_llm_judge_score?.toFixed(3)  ?? '—', sortable: true },
   { key: 'avg_entity_precision',label: 'NER Precision',  render: r => r.task_type === 'extraction' ? (r.avg_entity_precision?.toFixed(3) ?? '—') : <span className="text-gray-300">n/a</span>, sortable: true },
   { key: 'avg_entity_recall',   label: 'NER Recall',     render: r => r.task_type === 'extraction' ? (r.avg_entity_recall?.toFixed(3) ?? '—') : <span className="text-gray-300">n/a</span>, sortable: true },
   { key: 'avg_latency_ms',      label: 'Avg Latency',    render: r => r.avg_latency_ms != null ? `${Math.round(r.avg_latency_ms)} ms` : '—', sortable: true },
