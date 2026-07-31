@@ -169,6 +169,9 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
   const [model, setModel]           = useState('')
   const [dryRun, setDryRun]         = useState(false)
   const [notes, setNotes]           = useState('')
+  const [useJudge, setUseJudge]     = useState(false)
+  const [judgeProvider, setJudgeProvider] = useState('')
+  const [judgeModel, setJudgeModel] = useState('')
 
   // Task type + per-dataset selections
   const [taskType, setTaskType]     = useState('classification')
@@ -183,13 +186,20 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
   useEffect(() => {
     if (catalog && !provider) {
       const first = Object.keys(catalog).find(k => typeof catalog[k] === 'object' && catalog[k]?.available_models)
-      if (first) { setProvider(first); setModel(catalog[first]?.default_model ?? '') }
+      if (first) {
+        setProvider(first); setModel(catalog[first]?.default_model ?? '')
+        setJudgeProvider(first); setJudgeModel(catalog[first]?.default_model ?? '')
+      }
     }
   }, [catalog])
 
   useEffect(() => {
     if (catalog && provider) setModel(catalog[provider]?.default_model ?? '')
   }, [provider, catalog])
+
+  useEffect(() => {
+    if (catalog && judgeProvider) setJudgeModel(catalog[judgeProvider]?.default_model ?? '')
+  }, [judgeProvider, catalog])
 
   // Re-initialise selections when task type or task bank changes
   useEffect(() => {
@@ -219,6 +229,11 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
     return (catalog[provider]?.available_models ?? []).map(m => ({ value: m.id, label: m.display_name }))
   }, [catalog, provider])
 
+  const judgeModelOptions = useMemo(() => {
+    if (!catalog || !judgeProvider) return []
+    return (catalog[judgeProvider]?.available_models ?? []).map(m => ({ value: m.id, label: m.display_name }))
+  }, [catalog, judgeProvider])
+
   const datasetsForType = taskBank?.[taskType] ?? []
 
   const totalSelected = datasetsForType.reduce((sum, ds) => {
@@ -244,7 +259,12 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
           difficulty: selections[ds.file].difficulty || null,
         }))
       if (!datasets.length) throw new Error('Select at least one dataset.')
-      const { run_id } = await api.startRun({ provider, model, datasets, dry_run: dryRun, notes: notes || null })
+      const { run_id } = await api.startRun({
+        provider, model, datasets, dry_run: dryRun, notes: notes || null,
+        use_judge: useJudge && !dryRun,
+        judge_provider: useJudge && !dryRun ? judgeProvider : null,
+        judge_model:    useJudge && !dryRun ? judgeModel    : null,
+      })
       setActiveRunId(run_id)
     } catch (err) {
       setSubmitErr(err.message)
@@ -328,6 +348,35 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
               <span className="block text-xs text-gray-400 mt-0.5">No API calls — placeholder responses</span>
             </span>
           </label>
+
+          {/* LLM-as-Judge */}
+          <label className="flex items-start gap-2 cursor-pointer">
+            <input type="checkbox" checked={useJudge} onChange={e => setUseJudge(e.target.checked)}
+              disabled={!!isRunning || dryRun} className="mt-0.5 w-4 h-4 accent-purple-500" />
+            <span className="text-sm text-gray-700">
+              LLM-as-Judge
+              <span className="block text-xs text-gray-400 mt-0.5">Score outputs with a judge model</span>
+            </span>
+          </label>
+
+          {useJudge && !dryRun && (
+            <div className="ml-6 space-y-2">
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Judge Provider</label>
+                <select value={judgeProvider} onChange={e => setJudgeProvider(e.target.value)} disabled={!!isRunning}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50">
+                  {providerOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Judge Model</label>
+                <select value={judgeModel} onChange={e => setJudgeModel(e.target.value)} disabled={!!isRunning}
+                  className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50">
+                  {judgeModelOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </div>
+            </div>
+          )}
 
           <div className="border-t border-gray-100 pt-4 space-y-3">
             {/* Total summary */}

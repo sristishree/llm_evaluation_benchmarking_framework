@@ -206,11 +206,14 @@ class DatasetSelection(BaseModel):
 
 
 class RunRequest(BaseModel):
-    provider: str
-    model:    str
-    datasets: list[DatasetSelection]
-    dry_run:  bool = False
-    notes:    str | None = None
+    provider:       str
+    model:          str
+    datasets:       list[DatasetSelection]
+    dry_run:        bool = False
+    notes:          str | None = None
+    use_judge:      bool = False
+    judge_provider: str | None = None
+    judge_model:    str | None = None
 
 
 @app.post("/api/runs", status_code=202)
@@ -340,15 +343,30 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
         config = ProviderConfig(provider=req.provider, model=req.model)
         scored: list[ScoredResult] = []
 
+        judge = None
+        if req.use_judge and req.judge_model and not req.dry_run:
+            from evaluators.llm_judge import LLMJudge
+            import os
+            judge = LLMJudge(
+                model=req.judge_model,
+                api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+                api_key=os.environ.get("LITELLM_API_KEY"),
+            )
+
         for i, task in enumerate(tasks):
             result = run_task(task, config, dry_run=req.dry_run)
+            scores = compute_scores(result, task)
+            if judge is not None:
+                judge_score = judge.judge(result, task)
+                if judge_score is not None:
+                    scores = scores.model_copy(update={"llm_judge_score": judge_score})
             scored.append(ScoredResult(
                 run_id=run_id,
                 result=result,
                 difficulty=task.difficulty,
                 domain=task.domain,
                 expected=task.expected,
-                scores=compute_scores(result, task),
+                scores=scores,
                 estimated_cost_usd=result.estimated_cost_usd,
             ))
             _set_job(run_id, progress=i + 1)

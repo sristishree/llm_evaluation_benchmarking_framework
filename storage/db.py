@@ -267,6 +267,7 @@ class ResultsStore:
                 AVG(bert_score)             AS avg_bert_score,
                 AVG(exact_match)            AS avg_exact_match,
                 AVG(token_f1)               AS avg_token_f1,
+                AVG(llm_judge_score)        AS avg_llm_judge_score,
                 SQRT(MAX(0, AVG(rouge_l * rouge_l)       - AVG(rouge_l) * AVG(rouge_l)))           AS std_rouge_l,
                 SQRT(MAX(0, AVG(bert_score * bert_score) - AVG(bert_score) * AVG(bert_score)))     AS std_bert_score,
                 SQRT(MAX(0, AVG(exact_match * exact_match) - AVG(exact_match) * AVG(exact_match))) AS std_exact_match,
