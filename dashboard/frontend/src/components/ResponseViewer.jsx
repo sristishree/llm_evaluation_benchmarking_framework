@@ -39,22 +39,55 @@ function OutputBlock({ label, value, highlight }) {
   )
 }
 
+const DIM_LABEL = {
+  judge_faithfulness:  'Faithful',
+  judge_coverage:      'Coverage',
+  judge_conciseness:   'Concise',
+  judge_completeness:  'Complete',
+  judge_precision:     'Precision',
+  judge_accuracy:      'Accuracy',
+  judge_justifiability:'Justify',
+}
+
+function DimBadge({ dimKey, value }) {
+  const pct = value * 100
+  const color = pct >= 70 ? 'bg-purple-100 text-purple-700'
+              : pct >= 40 ? 'bg-yellow-100 text-yellow-700'
+              :              'bg-red-100 text-red-700'
+  const label = DIM_LABEL[dimKey] ?? dimKey.replace('judge_', '')
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-semibold px-2 py-0.5 rounded-full ${color}`}>
+      {label}: {value.toFixed(2)}
+    </span>
+  )
+}
+
 function ResponseCard({ row }) {
   const scores = SCORE_FIELDS.filter(f => row[f.key] != null)
   const isWrong = row.exact_match != null && row.exact_match < 1.0
+  const dims = row.judge_dimensions
+    ? Object.entries(row.judge_dimensions).filter(([, v]) => v != null)
+    : []
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 shadow-sm flex flex-col min-w-0">
       {/* Card header */}
       <div className="px-4 py-3 border-b border-gray-100">
-        <p className="font-semibold text-gray-800">{row.provider}</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <p className="font-semibold text-gray-800">{row.provider}</p>
+          {row.rubric_overridden === 1 && (
+            <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full font-semibold">
+              custom rubric
+            </span>
+          )}
+        </div>
         <p className="text-xs text-gray-400">{row.model}</p>
         <p className="text-xs text-gray-400 mt-0.5">
           {Math.round(row.latency_ms)} ms · {(row.total_tokens || 0).toLocaleString()} tokens
         </p>
       </div>
 
-      {/* Scores */}
+      {/* Overall scores */}
       {scores.length > 0 && (
         <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap gap-1">
           {scores.map(f => <ScoreBadge key={f.key} label={f.label} value={row[f.key]} />)}
@@ -63,6 +96,16 @@ function ResponseCard({ row }) {
       {scores.length === 0 && (
         <div className="px-4 py-2 border-b border-gray-100">
           <span className="text-xs text-gray-400">No scores yet</span>
+        </div>
+      )}
+
+      {/* Judge dimension scores */}
+      {dims.length > 0 && (
+        <div className="px-4 py-2 border-b border-gray-100 space-y-1">
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Judge dimensions</p>
+          <div className="flex flex-wrap gap-1">
+            {dims.map(([k, v]) => <DimBadge key={k} dimKey={k} value={v} />)}
+          </div>
         </div>
       )}
 
