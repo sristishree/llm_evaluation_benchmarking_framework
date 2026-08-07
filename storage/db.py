@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS run_results (
     top_p              REAL    NOT NULL DEFAULT 1.0,
     seed               INTEGER,
     expected           TEXT,
+    task_input         TEXT,
     raw_output         TEXT,
     parsed_output      TEXT,
     parse_error        TEXT,
@@ -105,6 +106,8 @@ class ResultsStore:
             self._conn.execute(
                 "ALTER TABLE run_results ADD COLUMN rubric_overridden INTEGER NOT NULL DEFAULT 0"
             )
+        if "task_input" not in existing:
+            self._conn.execute("ALTER TABLE run_results ADD COLUMN task_input TEXT")
 
     # -----------------------------------------------------------------------
     # Write
@@ -130,6 +133,7 @@ class ResultsStore:
             "top_p":              r.generation_config.top_p,
             "seed":               r.generation_config.seed,
             "expected":           json.dumps(scored.expected) if scored.expected is not None else None,
+            "task_input":         scored.task_input,
             "raw_output":         r.raw_output,
             "parsed_output":      json.dumps(r.parsed_output) if r.parsed_output is not None else None,
             "parse_error":        r.parse_error,

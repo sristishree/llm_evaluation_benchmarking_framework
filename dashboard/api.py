@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import sys
 import threading
@@ -35,7 +36,42 @@ logging.basicConfig(
 logging.getLogger("evaluators").setLevel(logging.DEBUG)
 logging.getLogger("storage").setLevel(logging.DEBUG)
 
-app = FastAPI(title="LLM Evaluation Benchmark API", version="0.1.0")
+_TAGS_METADATA = [
+    {
+        "name": "configuration",
+        "description": "Provider catalog, dataset task-bank metadata, and rubric defaults.",
+    },
+    {
+        "name": "runs",
+        "description": "Start, monitor, retrieve, and delete benchmark runs.",
+    },
+    {
+        "name": "scores",
+        "description": "Aggregated score analytics powering charts and comparisons.",
+    },
+    {
+        "name": "results",
+        "description": "Row-level generation results with full metric detail.",
+    },
+    {
+        "name": "judge",
+        "description": "LLM-as-a-judge prompt preview and calibration against human scores.",
+    },
+]
+
+app = FastAPI(
+    title="LLM Evaluation Benchmark API",
+    version="1.0.0",
+    description=(
+        "REST API for the LLM Evaluation Framework. "
+        "Run benchmarks across providers and models, retrieve aggregated scores, "
+        "and calibrate an LLM-as-a-judge against human ratings.\n\n"
+        "**Interactive docs:** `/docs` (Swagger UI) · `/redoc` (ReDoc)"
+    ),
+    openapi_tags=_TAGS_METADATA,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,7 +80,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_DB_PATH   = Path(__file__).parent.parent / "results.db"
+_DB_PATH   = Path(os.environ.get("DATA_DIR", str(Path(__file__).parent.parent))) / "results.db"
 _TASK_BANK = Path(__file__).parent.parent / "task_bank"
 _CONFIG    = Path(__file__).parent.parent / "config" / "providers.yaml"
 
@@ -106,8 +142,14 @@ def _store() -> ResultsStore:
 # Provider catalog
 # ---------------------------------------------------------------------------
 
-@app.get("/api/catalog")
+@app.get(
+    "/api/catalog",
+    tags=["configuration"],
+    summary="List available providers and models",
+    response_description="Parsed contents of providers.yaml — provider names mapped to their model lists.",
+)
 def get_catalog() -> dict[str, Any]:
+    """Return the full provider/model catalog loaded from `config/providers.yaml`."""
     with open(_CONFIG) as f:
         return yaml.safe_load(f)
 
@@ -116,8 +158,17 @@ def get_catalog() -> dict[str, Any]:
 # Task bank stats (powers the dataset selector panel)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/task-bank")
+@app.get(
+    "/api/task-bank",
+    tags=["configuration"],
+    summary="Dataset metadata and difficulty statistics",
+    response_description="Map of task_type → list of dataset entries with total count and easy/medium/hard breakdown.",
+)
 def task_bank_stats(refresh: bool = False) -> dict[str, Any]:
+    """Return metadata for every JSONL dataset in the task bank.
+
+    Results are cached in memory; pass `refresh=true` to force a re-scan.
+    """
     global _task_bank_cache
     with _task_bank_lock:
         if _task_bank_cache is not None and not refresh:
@@ -178,7 +229,12 @@ def _build_task_bank_stats() -> dict[str, Any]:
 # Default rubric for a task type (powers the rubric preview in the UI)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/rubric")
+@app.get(
+    "/api/rubric",
+    tags=["configuration"],
+    summary="Get default rubric for a dataset or task type",
+    response_description="Rubric string, task_type, and the resolved dataset_file.",
+)
 def get_default_rubric(
     dataset_file: str | None = Query(None),
     task_type:    str | None = Query(None),
@@ -239,14 +295,27 @@ def get_default_rubric(
 # Run list + summary (read-only, from DB)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/runs")
+@app.get(
+    "/api/runs",
+    tags=["runs"],
+    summary="List all benchmark runs",
+    response_description="Array of run metadata records ordered by most-recent first.",
+)
 def list_runs() -> list[dict[str, Any]]:
+    """Return summary metadata for every benchmark run stored in the database."""
     with _store() as s:
         return s.list_runs()
 
 
-@app.delete("/api/runs/{run_id}", status_code=200)
+@app.delete(
+    "/api/runs/{run_id}",
+    tags=["runs"],
+    summary="Delete a run and all its results",
+    status_code=200,
+    response_description="Confirmation with count of deleted result rows.",
+)
 def delete_run(run_id: str) -> dict[str, Any]:
+    """Permanently remove a run batch and every associated result row from the database."""
     with _jobs_lock:
         _jobs.pop(run_id, None)
     with _store() as s:
@@ -254,13 +323,25 @@ def delete_run(run_id: str) -> dict[str, Any]:
     return {"run_id": run_id, "results_deleted": deleted}
 
 
-@app.get("/api/runs/{run_id}/summary")
+@app.get(
+    "/api/runs/{run_id}/summary",
+    tags=["runs"],
+    summary="Get detailed run summary",
+    response_description="Aggregated metrics and metadata for the completed run.",
+)
 def get_run_summary(run_id: str) -> dict[str, Any]:
+    """Return the full summary for a completed benchmark run by its UUID."""
     with _store() as s:
         return s.get_run_summary(run_id)
 
 
-@app.get("/api/runs/{run_id}")
+@app.get(
+    "/api/runs/{run_id}",
+    tags=["runs"],
+    summary="Get run summary (compatibility alias)",
+    response_description="Same response as /api/runs/{run_id}/summary.",
+    include_in_schema=False,
+)
 def get_run_summary_compat(run_id: str) -> dict[str, Any]:
     with _store() as s:
         return s.get_run_summary(run_id)
@@ -292,8 +373,20 @@ class RunRequest(BaseModel):
     rubric_overrides:      dict[str, str] = {}
 
 
-@app.post("/api/runs", status_code=202)
+@app.post(
+    "/api/runs",
+    tags=["runs"],
+    summary="Start a benchmark run",
+    status_code=202,
+    response_description="Accepted — returns run_id immediately; poll /api/runs/{run_id}/status for progress.",
+)
 def start_run(req: RunRequest) -> dict[str, Any]:
+    """Launch an async benchmark run.
+
+    The run executes in a background thread. The response (HTTP 202) returns immediately
+    with a `run_id`. Poll `GET /api/runs/{run_id}/status` to track progress.
+    When `state` becomes `"done"`, results are available via `/api/results?run_id=…`.
+    """
     if not req.datasets:
         raise HTTPException(status_code=422, detail="Select at least one dataset.")
     run_id = str(uuid.uuid4())
@@ -311,8 +404,17 @@ def start_run(req: RunRequest) -> dict[str, Any]:
     return {"run_id": run_id}
 
 
-@app.get("/api/runs/{run_id}/status")
+@app.get(
+    "/api/runs/{run_id}/status",
+    tags=["runs"],
+    summary="Poll run progress",
+    response_description="Job state object with `state` (loading | running | done | error), progress counters, and timestamps.",
+)
 def run_status(run_id: str) -> dict[str, Any]:
+    """Return live progress for an in-flight run, or the completed summary for a finished one.
+
+    `state` values: `loading` → `running` → `done` | `error`.
+    """
     with _jobs_lock:
         job = _jobs.get(run_id)
     if job:
@@ -328,33 +430,62 @@ def run_status(run_id: str) -> dict[str, Any]:
 # Aggregate score endpoints (power the charts)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/scores/breakdown")
+@app.get(
+    "/api/scores/breakdown",
+    tags=["scores"],
+    summary="Score breakdown by provider and task type",
+    response_description="Aggregated mean scores grouped by provider × task_type.",
+)
 def score_breakdown(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return mean scores aggregated by provider and task type — the primary bar-chart dataset."""
     with _store() as s:
         return s.agg_by_provider_and_type(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/heatmap")
+@app.get(
+    "/api/scores/heatmap",
+    tags=["scores"],
+    summary="Provider × model score heatmap",
+    response_description="Matrix of mean scores indexed by provider and model.",
+)
 def score_heatmap(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return aggregated scores in heatmap format — one row per provider/model combination."""
     with _store() as s:
         return s.agg_heatmap(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/cost-quality")
+@app.get(
+    "/api/scores/cost-quality",
+    tags=["scores"],
+    summary="Cost vs quality comparison",
+    response_description="Per-model data points with estimated_cost_usd and composite quality score.",
+)
 def cost_vs_quality(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return cost vs quality data points for the scatter-plot view — one record per provider/model."""
     with _store() as s:
         return s.agg_cost_vs_quality(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/by-domain")
+@app.get(
+    "/api/scores/by-domain",
+    tags=["scores"],
+    summary="Score breakdown by domain",
+    response_description="Mean scores grouped by domain label.",
+)
 def score_by_domain(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return mean scores aggregated by domain — powers the domain breakdown chart."""
     with _store() as s:
         return s.agg_by_domain(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/distribution")
+@app.get(
+    "/api/scores/distribution",
+    tags=["scores"],
+    summary="Individual score values for histogram charts",
+    response_description="Flat list of per-result score fields (exact_match, rouge_l, bert_score, etc.).",
+)
 def score_distribution(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
-    """Individual score values per result — used for histogram charts."""
+    """Return one record per result with all metric values — used to draw score-distribution histograms."""
     with _store() as s:
         rows = s.query(dry_run=False if not include_dry_runs else None)
         return [
@@ -379,16 +510,26 @@ def score_distribution(include_dry_runs: bool = Query(False)) -> list[dict[str, 
 # Row-level results (powers the response viewer)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/results")
+@app.get(
+    "/api/results",
+    tags=["results"],
+    summary="Query generation results with filters",
+    response_description="Up to `limit` result rows with metrics, raw outputs, and optional judge scores.",
+)
 def query_results(
-    provider:  str | None = Query(None),
-    model:     str | None = Query(None),
-    task_type: str | None = Query(None),
-    difficulty:str | None = Query(None),
-    domain:    str | None = Query(None),
-    run_id:    str | None = Query(None),
-    limit:     int        = Query(200, le=1000),
+    provider:  str | None = Query(None, description="Filter by provider name (e.g. `openai`)."),
+    model:     str | None = Query(None, description="Filter by model identifier."),
+    task_type: str | None = Query(None, description="One of: `classification`, `qa`, `summarization`, `extraction`."),
+    difficulty:str | None = Query(None, description="One of: `easy`, `medium`, `hard`."),
+    domain:    str | None = Query(None, description="Domain label stored on the task."),
+    run_id:    str | None = Query(None, description="UUID of a specific benchmark run."),
+    limit:     int        = Query(200, le=1000, description="Maximum rows to return (hard cap 1000)."),
 ) -> list[dict[str, Any]]:
+    """Query row-level results from the database with optional filters.
+
+    All filter parameters are optional and combinable.
+    LLM-judge dimension scores (if present) are surfaced as `judge_dimensions` and `judge_reasoning`.
+    """
     with _store() as s:
         rows = s.query(
             provider=provider, model=model, task_type=task_type,
@@ -426,9 +567,17 @@ class PreviewRequest(BaseModel):
     rubric_overrides: dict[str, str] = {}   # dataset_file → rubric string
 
 
-@app.post("/api/judge/preview")
+@app.post(
+    "/api/judge/preview",
+    tags=["judge"],
+    summary="Preview judge prompts (no LLM call)",
+    response_description="List of rendered judge prompts — one per sampled task across all dataset files.",
+)
 def preview_judge(req: PreviewRequest) -> list[dict[str, Any]]:
-    """Return judge prompt previews for all selected datasets without any LLM call."""
+    """Return judge prompt previews for all selected datasets without any LLM call.
+
+    Useful for inspecting and refining rubrics before spending on a full scored run.
+    """
     from evaluators.llm_judge import build_preview
     from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
 
@@ -487,7 +636,12 @@ class CalibrateRequest(BaseModel):
     mitigate_position_bias: bool = False
 
 
-@app.post("/api/judge/calibrate")
+@app.post(
+    "/api/judge/calibrate",
+    tags=["judge"],
+    summary="Calibrate judge against human scores",
+    response_description="CalibrationReport with Pearson r, mean bias, and per-task deltas.",
+)
 def calibrate_judge(req: CalibrateRequest) -> dict[str, Any]:
     """Compare LLM judge scores against human ratings on a small held-out slice.
 
@@ -528,7 +682,7 @@ def calibrate_judge(req: CalibrateRequest) -> dict[str, Any]:
 
         judge = LLMJudge(
             model=req.judge_model,
-            api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+            api_base=os.environ.get("LITELLM_BASE_URL"),
             api_key=os.environ.get("LITELLM_API_KEY"),
             mitigate_position_bias=req.mitigate_position_bias,
         )
@@ -646,7 +800,7 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
             import os
             judge = LLMJudge(
                 model=req.judge_model,
-                api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+                api_base=os.environ.get("LITELLM_BASE_URL"),
                 api_key=os.environ.get("LITELLM_API_KEY"),
                 mitigate_position_bias=req.mitigate_position_bias,
             )
@@ -671,6 +825,7 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
                 difficulty=task.difficulty,
                 domain=task.domain,
                 expected=task.expected,
+                task_input=task.input,
                 scores=scores,
                 estimated_cost_usd=result.estimated_cost_usd,
             ))

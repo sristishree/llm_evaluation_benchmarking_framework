@@ -77,5 +77,6 @@ class ScoredResult(BaseModel):
     difficulty: Literal["easy", "medium", "hard"]
     domain: str
     expected: Any | None = None
+    task_input: str | None = None
     scores: Scores = Field(default_factory=Scores)
     estimated_cost_usd: float | None = None

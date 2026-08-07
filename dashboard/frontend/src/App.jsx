@@ -5,7 +5,6 @@ import RunHistory from './components/RunHistory'
 import ScoreBreakdown from './components/ScoreBreakdown'
 import Heatmap from './components/Heatmap'
 import DomainBreakdown from './components/DomainBreakdown'
-import ResponseViewer from './components/ResponseViewer'
 
 const TABS = [
   { id: 'run',      label: 'Run Benchmark',   icon: '▶',  component: RunBenchmark },
@@ -13,7 +12,6 @@ const TABS = [
   { id: 'scores',   label: 'Score Breakdown', icon: '📈', component: ScoreBreakdown },
   { id: 'heatmap',  label: 'Heatmap',         icon: '🔥', component: Heatmap },
   { id: 'domain',   label: 'Domain Analysis', icon: '🌐', component: DomainBreakdown },
-  { id: 'viewer',   label: 'Response Viewer', icon: '🔍', component: ResponseViewer },
 ]
 
 const DRY_RUN_TABS = new Set(['history', 'scores', 'heatmap', 'domain'])
@@ -152,7 +150,7 @@ const { component: ActiveView } = TABS.find(t => t.id === active)
       </nav>
 
       {/* Content */}
-      <main className="px-8 py-8 max-w-screen-xl mx-auto">
+      <main className={active === 'history' ? 'px-3 py-3' : 'px-8 py-8 max-w-screen-xl mx-auto'}>
         {/* Dry-run filter bar — only on tabs where it's relevant */}
         {DRY_RUN_TABS.has(active) && (
           <div className="mb-6 flex justify-end">

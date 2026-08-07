@@ -9,6 +9,13 @@ from typing import Any
 import litellm
 import openai
 from openai import OpenAI
+
+# Pre-warm litellm's cost map once at import time so per-task completion_cost()
+# calls don't each trigger a remote fetch (which shows up as 20 proxy hits for 20 tasks).
+try:
+    litellm.get_model_cost_map()
+except Exception:
+    pass
 from tenacity import (
     Retrying,
     retry_if_exception_type,
