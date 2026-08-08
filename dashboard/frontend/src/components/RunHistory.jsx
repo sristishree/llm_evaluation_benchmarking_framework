@@ -1,7 +1,7 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { api } from '../api'
 import { useApi } from '../hooks/useApi'
-import { Spinner, ErrorCard, EmptyState, MetricTile, SectionHeader, Select } from './ui'
+import { Spinner, ErrorCard, EmptyState, MetricTile, SectionHeader, Select, CopyButton } from './ui'
 
 function fmt(n, digits = 0) {
   if (n == null) return '—'
@@ -108,7 +108,7 @@ function CollapsibleBlock({ label, value, defaultOpen = false }) {
 
 // ── Task card ──────────────────────────────────────────────────────────────────
 
-function TaskCard({ row }) {
+function TaskCard({ row, judgeModel }) {
   const [open, setOpen] = useState(false)
   const dims    = row.judge_dimensions ? Object.entries(row.judge_dimensions).filter(([, v]) => v != null) : []
   const hasJudge = row.llm_judge_score != null
@@ -154,9 +154,14 @@ function TaskCard({ row }) {
 
           {hasJudge && (
             <div className="space-y-2">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">LLM Judge</p>
                 <ScorePill value={row.llm_judge_score} large />
+                {judgeModel && judgeModel !== 'inline (pre-history)' && (
+                  <code className="text-xs font-mono text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded" title={judgeModel}>
+                    {judgeModel}
+                  </code>
+                )}
               </div>
               {dims.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">
@@ -198,31 +203,53 @@ function TaskCard({ row }) {
 
 // ── Right pane: run detail ─────────────────────────────────────────────────────
 
-const TASK_SORT_OPTIONS = [
-  { value: 'judge_desc', label: 'Judge Score ↓' },
-  { value: 'judge_asc',  label: 'Judge Score ↑' },
-  { value: 'id_asc',     label: 'Task ID A→Z' },
-  { value: 'diff_asc',   label: 'Difficulty' },
-]
-
 const DIFFICULTY_ORDER = { easy: 0, medium: 1, hard: 2 }
 
 function RunDetail({ runId }) {
   const [sortBy, setSortBy] = useState('judge_desc')
 
-  const { data: summary, loading: sumLoading } = useApi(() => api.runSummary(runId), [runId])
-  const { data: tasks,   loading: taskLoading } = useApi(() => api.results({ run_id: runId, limit: 1000 }), [runId])
+  const { data: summary,    loading: sumLoading  } = useApi(() => api.runSummary(runId), [runId])
+  const { data: tasks,      loading: taskLoading } = useApi(() => api.results({ run_id: runId, limit: 1000 }), [runId])
+  const { data: judgeRuns } = useApi(() => api.judgeRuns(runId), [runId])
+
+  const inlineJudgeModel = useMemo(() => {
+    if (!judgeRuns?.length) return null
+    const inline = judgeRuns.find(jr => jr.source === 'benchmark' || jr.source === 'backfill')
+    return inline?.judge_model ?? null
+  }, [judgeRuns])
+
+  const hasJudge = useMemo(() => tasks?.some(t => t.llm_judge_score != null) ?? false, [tasks])
+
+  const sortOptions = useMemo(() => {
+    const opts = []
+    if (hasJudge) {
+      opts.push({ value: 'judge_desc', label: 'Judge Score ↓' })
+      opts.push({ value: 'judge_asc',  label: 'Judge Score ↑' })
+    }
+    opts.push({ value: 'id_asc',   label: 'Task ID A→Z' })
+    opts.push({ value: 'diff_asc', label: 'Difficulty' })
+    return opts
+  }, [hasJudge])
+
+  // Reset sort to a sensible default when the available options change
+  useEffect(() => {
+    setSortBy(prev => {
+      if (sortOptions.some(o => o.value === prev)) return prev
+      return hasJudge ? 'judge_desc' : 'id_asc'
+    })
+  }, [runId, sortOptions])
 
   const sorted = useMemo(() => {
     if (!tasks?.length) return []
+    const effective = sortOptions.some(o => o.value === sortBy) ? sortBy : sortOptions[0]?.value
     return [...tasks].sort((a, b) => {
-      if (sortBy === 'id_asc')     return a.task_id.localeCompare(b.task_id)
-      if (sortBy === 'diff_asc')   return (DIFFICULTY_ORDER[a.difficulty] ?? 9) - (DIFFICULTY_ORDER[b.difficulty] ?? 9)
-      if (sortBy === 'judge_desc') return (b.llm_judge_score ?? -1) - (a.llm_judge_score ?? -1)
-      if (sortBy === 'judge_asc')  return (a.llm_judge_score ?? -1) - (b.llm_judge_score ?? -1)
+      if (effective === 'id_asc')     return a.task_id.localeCompare(b.task_id)
+      if (effective === 'diff_asc')   return (DIFFICULTY_ORDER[a.difficulty] ?? 9) - (DIFFICULTY_ORDER[b.difficulty] ?? 9)
+      if (effective === 'judge_desc') return (b.llm_judge_score ?? -1) - (a.llm_judge_score ?? -1)
+      if (effective === 'judge_asc')  return (a.llm_judge_score ?? -1) - (b.llm_judge_score ?? -1)
       return 0
     })
-  }, [tasks, sortBy])
+  }, [tasks, sortBy, sortOptions])
 
   if (sumLoading || taskLoading) return (
     <div className="flex items-center justify-center gap-2 text-sm text-gray-500 h-full">
@@ -232,24 +259,24 @@ function RunDetail({ runId }) {
   )
 
   return (
-    <div className="h-full flex flex-col gap-4">
+    <div className="h-full flex flex-col gap-4 p-1">
       {summary && Object.keys(summary).length > 0 && (
         <div className="grid grid-cols-5 gap-3 flex-shrink-0">
           <MetricTile label="Tasks"       value={fmt(summary.task_count)} />
           <MetricTile label="Tokens"      value={fmt(summary.total_tokens)} />
-          <MetricTile label="Cost (USD)"  value={summary.total_cost_usd  != null ? `$${summary.total_cost_usd.toFixed(4)}` : '—'} />
+          <MetricTile label="Cost (USD)"  value={summary.total_cost_usd  > 0 ? `$${summary.total_cost_usd.toFixed(4)}` : '—'} />
           <MetricTile label="Avg Latency" value={summary.avg_latency_ms  != null ? `${Math.round(summary.avg_latency_ms)} ms` : '—'} />
           <MetricTile label="Avg Judge"   value={summary.avg_llm_judge   != null ? summary.avg_llm_judge.toFixed(3) : '—'} />
         </div>
       )}
 
       <div className="flex items-center gap-3 flex-shrink-0">
-        <div className="w-40">
+        <div className="w-48">
           <Select
             label="Sort tasks by"
             value={sortBy}
             onChange={setSortBy}
-            options={TASK_SORT_OPTIONS}
+            options={sortOptions}
           />
         </div>
         {tasks?.length > 0 && (
@@ -260,7 +287,7 @@ function RunDetail({ runId }) {
       <div className="flex-1 overflow-y-auto space-y-1.5 pr-0.5">
         {sorted.length === 0
           ? <EmptyState message="No tasks in this run." />
-          : sorted.map(row => <TaskCard key={row.id ?? row.task_id} row={row} />)
+          : sorted.map(row => <TaskCard key={row.id ?? row.task_id} row={row} judgeModel={inlineJudgeModel} />)
         }
       </div>
 
@@ -275,7 +302,7 @@ function RunDetail({ runId }) {
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
-export default function RunHistory({ includeDryRuns = false }) {
+export default function RunHistory({ includeDryRuns = false, pendingHistoryRunId, clearPendingHistoryRunId }) {
   const [refreshKey,      setRefreshKey]      = useState(0)
   const [deletingId,      setDeletingId]      = useState(null)
   const [deleteError,     setDeleteError]     = useState(null)
@@ -283,6 +310,14 @@ export default function RunHistory({ includeDryRuns = false }) {
   const [filterProvider,  setFilterProvider]  = useState('')
   const [filterTimeframe, setFilterTimeframe] = useState('')
   const [sortRunsBy,      setSortRunsBy]      = useState('newest')
+
+  useEffect(() => {
+    if (!pendingHistoryRunId) return
+    setSelectedId(pendingHistoryRunId)
+    setFilterProvider('')
+    setFilterTimeframe('')
+    clearPendingHistoryRunId?.()
+  }, [pendingHistoryRunId])
 
   const { data: allRuns, loading, error } = useApi(() => api.runs(), [refreshKey])
 
@@ -392,17 +427,24 @@ export default function RunHistory({ includeDryRuns = false }) {
             ? <div className="flex-1 flex items-center justify-center">
                 <EmptyState message="No runs match these filters." />
               </div>
-            : <div className="flex-1 overflow-y-auto">
-                <table className="w-full text-sm text-left">
+            : <div className="flex-1 overflow-y-auto overflow-x-hidden">
+                <table className="w-full text-sm text-left table-fixed">
+                  <colgroup>
+                    <col className="w-[130px]" />
+                    <col className="w-[90px]" />
+                    <col />
+                    <col className="w-[46px]" />
+                    <col className="w-[80px]" />
+                    <col className="w-[32px]" />
+                  </colgroup>
                   <thead className="sticky top-0 z-10">
                     <tr className="bg-gray-50 border-b border-gray-200 text-gray-600">
-                      <th className="px-4 py-2.5 font-semibold text-xs uppercase tracking-wide">Run ID</th>
-                      <th className="px-4 py-2.5 font-semibold text-xs uppercase tracking-wide">Provider</th>
-                      <th className="px-4 py-2.5 font-semibold text-xs uppercase tracking-wide">Model</th>
-                      <th className="px-4 py-2.5 font-semibold text-xs uppercase tracking-wide text-right">Tasks</th>
-                      <th className="px-4 py-2.5 font-semibold text-xs uppercase tracking-wide">Created</th>
-                      <th className="px-4 py-2.5 font-semibold text-xs uppercase tracking-wide">Notes</th>
-                      <th className="px-4 py-2.5 w-8" />
+                      <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Run ID</th>
+                      <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Provider</th>
+                      <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Model</th>
+                      <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide text-right">Tasks</th>
+                      <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Created</th>
+                      <th className="px-3 py-2.5 w-8" />
                     </tr>
                   </thead>
                   <tbody>
@@ -416,25 +458,25 @@ export default function RunHistory({ includeDryRuns = false }) {
                             isSelected ? 'bg-blue-50 border-blue-100' : 'hover:bg-gray-50'
                           }`}
                         >
-                          <td className="px-4 py-3">
-                            <div className="flex items-center gap-2">
-                              <code className="text-xs font-mono bg-gray-100 px-2 py-0.5 rounded" title={run.run_id}>
+                          <td className="px-3 py-3">
+                            <div className="flex items-center gap-1 min-w-0">
+                              <code className="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded shrink-0" title={run.run_id}>
                                 {run.run_id.slice(0, 8)}…
                               </code>
+                              <CopyButton text={run.run_id} className="opacity-0 group-hover:opacity-100 shrink-0" />
                               {run.is_dry_run === 1 && (
-                                <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full font-medium">dry</span>
+                                <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded-full font-medium shrink-0">dry</span>
                               )}
                             </div>
                           </td>
-                          <td className="px-4 py-3 font-medium text-gray-800">{run.provider}</td>
-                          <td className="px-4 py-3 text-xs text-gray-500 font-mono max-w-[160px] truncate">{run.model}</td>
-                          <td className="px-4 py-3 text-gray-700 text-right tabular-nums">{run.task_count}</td>
-                          <td className="px-4 py-3 text-gray-500 whitespace-nowrap">
-                            <div className="text-xs">{new Date(run.created_at).toLocaleDateString()}</div>
-                            <div className="text-xs text-gray-400">{new Date(run.created_at).toLocaleTimeString()}</div>
+                          <td className="px-3 py-3 font-medium text-gray-800 truncate">{run.provider}</td>
+                          <td className="px-3 py-3 text-xs text-gray-500 font-mono truncate" title={run.model}>{run.model}</td>
+                          <td className="px-3 py-3 text-gray-700 text-right tabular-nums">{run.task_count}</td>
+                          <td className="px-3 py-3 text-gray-500">
+                            <div className="text-xs whitespace-nowrap">{new Date(run.created_at).toLocaleDateString()}</div>
+                            <div className="text-xs text-gray-400 whitespace-nowrap">{new Date(run.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
                           </td>
-                          <td className="px-4 py-3 text-xs text-gray-400 max-w-[140px] truncate">{run.notes || '—'}</td>
-                          <td className="px-4 py-3">
+                          <td className="px-3 py-3">
                             <button
                               onClick={e => { e.stopPropagation(); handleDelete(run) }}
                               disabled={deletingId === run.run_id}

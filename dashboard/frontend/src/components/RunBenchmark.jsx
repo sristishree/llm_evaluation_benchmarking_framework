@@ -49,7 +49,7 @@ function DiffBar({ counts }) {
 // ── Single dataset card ───────────────────────────────────────────────────
 
 function DatasetCard({ dataset, sel, onChange }) {
-  const { file, name, description, total, difficulty: counts, is_combined } = dataset
+  const { name, description, total, difficulty: counts, is_combined } = dataset
   const maxForDiff = sel.difficulty
     ? (counts[sel.difficulty] ?? 0)
     : total
@@ -136,15 +136,19 @@ function DatasetCard({ dataset, sel, onChange }) {
 
 function ProgressBar({ progress, total, state }) {
   const pct = total > 0 ? Math.round((progress / total) * 100) : 0
-  const color = state === 'done' ? 'bg-green-500' : state === 'error' ? 'bg-red-500' : 'bg-blue-500'
+  const color = state === 'done'      ? 'bg-green-500'
+              : state === 'error'     ? 'bg-red-500'
+              : state === 'cancelled' ? 'bg-amber-400'
+              :                         'bg-blue-500'
   return (
     <div>
       <div className="flex justify-between text-xs text-gray-500 mb-1">
         <span>
-          {state === 'loading' && 'Loading tasks from task bank…'}
-          {state === 'running' && `Running task ${progress} of ${total}`}
-          {state === 'done'    && `Done — ${total} task${total !== 1 ? 's' : ''} completed`}
-          {state === 'error'   && 'Run failed'}
+          {state === 'loading'   && 'Loading tasks from task bank…'}
+          {state === 'running'   && `Running task ${progress} of ${total}`}
+          {state === 'done'      && `Done — ${total} task${total !== 1 ? 's' : ''} completed`}
+          {state === 'error'     && 'Run failed'}
+          {state === 'cancelled' && `Cancelled after ${progress} of ${total} task${total !== 1 ? 's' : ''}`}
         </span>
         {state !== 'loading' && <span>{pct}%</span>}
       </div>
@@ -160,7 +164,7 @@ function ProgressBar({ progress, total, state }) {
 
 // ── Main component ────────────────────────────────────────────────────────
 
-export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus }) {
+export default function RunBenchmark({ setActiveRunId, runStatus, cancelRun }) {
   const { data: catalog, loading: catalogLoading, error: catalogError } = useApi(() => api.catalog())
   const { data: taskBank, loading: bankLoading, error: bankError } = useApi(() => api.taskBank())
 
@@ -220,7 +224,7 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
       const next = {}
       for (const ds of taskBank[taskType]) {
         next[ds.file] = prev[ds.file] ?? {
-          enabled:    !ds.is_combined,
+          enabled:    false,
           limit:      Math.min(10, ds.total),
           difficulty: '',
         }
@@ -282,9 +286,10 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
     return sum + (s?.enabled ? s.limit : 0)
   }, 0)
 
-  const isRunning = status && (status.state === 'loading' || status.state === 'running')
-  const isDone    = status?.state === 'done'
-  const isError   = status?.state === 'error'
+  const isRunning   = status && (status.state === 'loading' || status.state === 'running')
+  const isDone      = status?.state === 'done'
+  const isError     = status?.state === 'error'
+  const isCancelled = status?.state === 'cancelled'
 
   const numOverrides = Object.keys(activeOverrides).length
 
@@ -542,20 +547,38 @@ export default function RunBenchmark({ activeRunId, setActiveRunId, runStatus })
           {/* Progress */}
           {status && (
             <div className={`rounded-xl border p-4 space-y-3 ${
-              isDone ? 'border-green-200 bg-green-50' : isError ? 'border-red-200 bg-red-50' : 'border-blue-200 bg-blue-50'
+              isDone      ? 'border-green-200 bg-green-50'
+            : isError     ? 'border-red-200 bg-red-50'
+            : isCancelled ? 'border-amber-200 bg-amber-50'
+            :                'border-blue-200 bg-blue-50'
             }`}>
               <div className="flex items-center justify-between">
                 <p className="text-sm font-semibold text-gray-800">
-                  {isDone ? '✅ Done' : isError ? '❌ Failed' : '⏳ Running'}
+                  {isDone ? '✅ Done' : isError ? '❌ Failed' : isCancelled ? '⚠️ Cancelled' : '⏳ Running'}
                 </p>
-                {(isDone || isError) && (
-                  <button type="button" onClick={() => setActiveRunId(null)}
-                    className="text-xs text-gray-400 hover:text-gray-600">reset</button>
-                )}
+                <div className="flex items-center gap-2">
+                  {isRunning && (
+                    <button type="button" onClick={cancelRun}
+                      className="text-xs font-semibold text-red-600 hover:text-red-800 border border-red-200 rounded px-2 py-0.5 bg-white hover:bg-red-50 transition-colors">
+                      Cancel
+                    </button>
+                  )}
+                  {(isDone || isError || isCancelled) && (
+                    <button type="button" onClick={() => setActiveRunId(null)}
+                      className="text-xs text-gray-400 hover:text-gray-600">reset</button>
+                  )}
+                </div>
               </div>
               <ProgressBar progress={status.progress ?? 0} total={status.total ?? 0} state={status.state} />
               {isError && status.error && (
-                <p className="text-xs text-red-700 break-all">{status.error}</p>
+                <div className="rounded-lg bg-red-100 border border-red-200 px-3 py-2 text-xs text-red-800 break-all font-mono">
+                  {status.error}
+                </div>
+              )}
+              {isCancelled && (
+                <p className="text-xs text-amber-700">
+                  Run was cancelled. Completed tasks were saved — check <strong>Run History</strong>.
+                </p>
               )}
               {isDone && (
                 <p className="text-xs text-green-700">

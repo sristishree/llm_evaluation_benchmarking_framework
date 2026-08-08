@@ -6,16 +6,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
-import litellm
 import openai
 from openai import OpenAI
-
-# Pre-warm litellm's cost map once at import time so per-task completion_cost()
-# calls don't each trigger a remote fetch (which shows up as 20 proxy hits for 20 tasks).
-try:
-    litellm.get_model_cost_map()
-except Exception:
-    pass
 from tenacity import (
     Retrying,
     retry_if_exception_type,
@@ -112,7 +104,7 @@ class LLMClient:
         messages = build_messages(task, vision=self.vision)
 
         t0 = time.monotonic()
-        response = self._call_with_retry(messages, schema_cls)
+        response, cost = self._call_with_retry(messages, schema_cls)
         latency_ms = round((time.monotonic() - t0) * 1000, 2)
 
         raw = response.choices[0].message.content or ""
@@ -124,15 +116,6 @@ class LLMClient:
             "completion": getattr(usage, "completion_tokens", 0) or 0,
             "total": getattr(usage, "total_tokens", 0) or 0,
         }
-
-        cost = None
-        if hasattr(response, "_hidden_params"):
-            cost = response._hidden_params.get("response_cost")
-        if cost is None:
-            try:
-                cost = litellm.completion_cost(completion_response=response)
-            except Exception:
-                cost = None
 
         return RunResult(
             task_id=task.task_id,
@@ -164,9 +147,18 @@ class LLMClient:
             }
         return {"type": "json_object"}
 
-    def _call_with_retry(self, messages: list[dict], schema_cls: type) -> Any:
+    def _call_with_retry(self, messages: list[dict], schema_cls: type) -> tuple[Any, float | None]:
         response_format = self._build_response_format(schema_cls)
+        try:
+            return self._call_once(messages, response_format)
+        except openai.BadRequestError as e:
+            # json_schema structured output is only supported by newer models (gpt-4o+).
+            # Fall back to json_object for models that don't support it.
+            if response_format.get("type") == "json_schema" and "json_schema" in str(e):
+                return self._call_once(messages, {"type": "json_object"})
+            raise
 
+    def _call_once(self, messages: list[dict], response_format: dict) -> tuple[Any, float | None]:
         for attempt in Retrying(
             stop=stop_after_attempt(self.max_retries),
             wait=wait_exponential(multiplier=1, min=2, max=30),
@@ -174,7 +166,7 @@ class LLMClient:
             reraise=True,
         ):
             with attempt:
-                return self._client.chat.completions.create(
+                raw = self._client.with_raw_response.chat.completions.create(
                     model=self.model,
                     messages=messages,
                     temperature=self.temperature,
@@ -183,6 +175,9 @@ class LLMClient:
                     response_format=response_format,
                     timeout=self.timeout_seconds,
                 )
+                cost_str = raw.headers.get("x-litellm-response-cost")
+                cost = float(cost_str) if cost_str else None
+                return raw.parse(), cost
 
 
 # ------------------------------------------------------------------

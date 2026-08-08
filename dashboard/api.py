@@ -399,6 +399,7 @@ def start_run(req: RunRequest) -> dict[str, Any]:
             "error":       None,
             "started_at":  datetime.now(tz=timezone.utc).isoformat(),
             "finished_at": None,
+            "_cancel":     threading.Event(),
         }
     threading.Thread(target=_execute_run, args=(run_id, req), daemon=True).start()
     return {"run_id": run_id}
@@ -413,17 +414,38 @@ def start_run(req: RunRequest) -> dict[str, Any]:
 def run_status(run_id: str) -> dict[str, Any]:
     """Return live progress for an in-flight run, or the completed summary for a finished one.
 
-    `state` values: `loading` → `running` → `done` | `error`.
+    `state` values: `loading` → `running` → `done` | `error` | `cancelled`.
     """
     with _jobs_lock:
         job = _jobs.get(run_id)
     if job:
-        return job
+        return _public_job(job)
     with _store() as s:
         summary = s.get_run_summary(run_id)
     if summary:
         return {"run_id": run_id, "state": "done", **summary}
     raise HTTPException(status_code=404, detail="Run not found")
+
+
+@app.post(
+    "/api/runs/{run_id}/cancel",
+    tags=["runs"],
+    summary="Cancel a running benchmark",
+    status_code=200,
+)
+def cancel_run(run_id: str) -> dict[str, Any]:
+    """Signal a running benchmark to stop after the current task completes."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Run not found or already completed")
+    state = job.get("state")
+    if state not in ("loading", "running"):
+        raise HTTPException(status_code=409, detail=f"Run is already in state '{state}'")
+    cancel_event: threading.Event = job["_cancel"]
+    cancel_event.set()
+    _set_job(run_id, state="cancelled", finished_at=datetime.now(tz=timezone.utc).isoformat())
+    return {"run_id": run_id, "state": "cancelled"}
 
 
 # ---------------------------------------------------------------------------
@@ -555,6 +577,176 @@ def query_results(
             except Exception:
                 pass
     return rows
+
+
+# ---------------------------------------------------------------------------
+# LLM-as-Judge: retroactive judge runs (non-destructive history)
+# ---------------------------------------------------------------------------
+
+class RetroJudgeRequest(BaseModel):
+    judge_provider:        str | None = None
+    judge_model:           str
+    rubric_override:       str | None = None
+    mitigate_position_bias: bool = False
+
+
+@app.post(
+    "/api/runs/{run_id}/judge",
+    tags=["judge"],
+    summary="Start a retroactive judge run on an existing benchmark run",
+    status_code=202,
+)
+def start_retro_judge(run_id: str, req: RetroJudgeRequest) -> dict[str, Any]:
+    """Launch an async judge pass over all results in an existing benchmark run.
+
+    Results are stored in ``judge_results`` — original run_results are never mutated.
+    Poll ``GET /api/judge-runs/{judge_run_id}/status`` for progress.
+    """
+    with _store() as s:
+        rows = s.get_run_results_for_judging(run_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Run not found or has no scoreable results.")
+
+    judge_run_id = str(uuid.uuid4())
+    with _store() as s:
+        s.create_judge_run(
+            judge_run_id=judge_run_id,
+            run_id=run_id,
+            judge_model=req.judge_model,
+            judge_provider=req.judge_provider,
+            rubric_override=req.rubric_override,
+            mitigate_position_bias=req.mitigate_position_bias,
+            source="retroactive",
+        )
+
+    with _jobs_lock:
+        _jobs[judge_run_id] = {
+            "judge_run_id": judge_run_id,
+            "state":        "running",
+            "progress":     0,
+            "total":        len(rows),
+            "error":        None,
+        }
+
+    threading.Thread(
+        target=_execute_retro_judge,
+        args=(judge_run_id, run_id, rows, req),
+        daemon=True,
+    ).start()
+    return {"judge_run_id": judge_run_id}
+
+
+@app.get("/api/judge-runs", tags=["judge"], summary="List all judge runs")
+def list_judge_runs(run_id: str | None = Query(None)) -> list[dict[str, Any]]:
+    with _store() as s:
+        return s.list_judge_runs(run_id=run_id)
+
+
+@app.get("/api/judge-runs/{judge_run_id}/status", tags=["judge"], summary="Poll judge run progress")
+def judge_run_status(judge_run_id: str) -> dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(judge_run_id)
+    if job:
+        return job
+    with _store() as s:
+        run = s.get_judge_run(judge_run_id)
+    if run:
+        return {"judge_run_id": judge_run_id, "state": run["state"], **run}
+    raise HTTPException(status_code=404, detail="Judge run not found")
+
+
+@app.get("/api/judge-runs/{judge_run_id}/results", tags=["judge"], summary="Get per-task results of a judge run")
+def judge_run_results(judge_run_id: str) -> list[dict[str, Any]]:
+    with _store() as s:
+        return s.get_judge_run_results(judge_run_id)
+
+
+def _execute_retro_judge(
+    judge_run_id: str,
+    run_id: str,
+    rows: list[dict],
+    req: RetroJudgeRequest,
+) -> None:
+    import os
+    from evaluators.llm_judge import LLMJudge
+    from models.result import GenerationConfig, RunResult
+    from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
+
+    TYPE_CLS = {
+        "classification": ClassificationTask,
+        "qa":             QATask,
+        "summarization":  SummarizationTask,
+        "extraction":     ExtractionTask,
+    }
+
+    try:
+        judge = LLMJudge(
+            model=req.judge_model,
+            api_base=os.environ.get("LITELLM_BASE_URL"),
+            api_key=os.environ.get("LITELLM_API_KEY"),
+            mitigate_position_bias=req.mitigate_position_bias,
+        )
+
+        task_ids = {r["task_id"] for r in rows}
+        tasks_by_id = _find_tasks_by_ids(task_ids, TYPE_CLS)
+
+        for i, row in enumerate(rows):
+            task = tasks_by_id.get(row["task_id"])
+            if task is None and not req.rubric_override:
+                _set_job(judge_run_id, progress=i + 1)
+                continue
+
+            try:
+                parsed = json.loads(row["parsed_output"]) if row.get("parsed_output") else None
+            except Exception:
+                parsed = row.get("parsed_output")
+
+            result = RunResult(
+                task_id=row["task_id"],
+                task_type=row["task_type"],
+                provider=row["provider"],
+                model=row["model"],
+                generation_config=GenerationConfig(
+                    model=row["model"],
+                    temperature=row.get("temperature", 0.0),
+                    max_tokens=row.get("max_tokens", 1024),
+                    top_p=row.get("top_p", 1.0),
+                    seed=row.get("seed"),
+                ),
+                raw_output=row.get("raw_output") or "",
+                parsed_output=parsed,
+                parse_error=row.get("parse_error"),
+                tokens_used={
+                    "prompt":     row.get("prompt_tokens", 0),
+                    "completion": row.get("completion_tokens", 0),
+                    "total":      row.get("total_tokens", 0),
+                },
+                latency_ms=row.get("latency_ms", 0.0),
+            )
+
+            jr = judge.judge(result, task, rubric_override=req.rubric_override)
+
+            with _store() as s:
+                s.save_judge_result(
+                    judge_run_id=judge_run_id,
+                    result_id=row["id"],
+                    task_id=row["task_id"],
+                    llm_judge_score=jr.overall if jr else None,
+                    judge_reasoning=jr.reasoning if jr else None,
+                    rubric_overridden=jr.rubric_overridden if jr else False,
+                    dimensions=jr.dimensions if jr else {},
+                )
+
+            _set_job(judge_run_id, progress=i + 1)
+
+        with _store() as s:
+            s.finish_judge_run(judge_run_id, state="done")
+        _set_job(judge_run_id, state="done")
+
+    except Exception as exc:
+        with _store() as s:
+            s.finish_judge_run(judge_run_id, state="error", error=str(exc))
+        _set_job(judge_run_id, state="error", error=str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -776,6 +968,11 @@ def _find_tasks_by_ids(task_ids: set[str], type_cls: dict) -> dict:
 # Internal: async run execution
 # ---------------------------------------------------------------------------
 
+def _public_job(job: dict) -> dict:
+    """Return a copy of a job dict with internal (underscore-prefixed) fields stripped."""
+    return {k: v for k, v in job.items() if not k.startswith("_")}
+
+
 def _set_job(run_id: str, **kwargs: Any) -> None:
     with _jobs_lock:
         _jobs[run_id].update(kwargs)
@@ -794,6 +991,9 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
         config = ProviderConfig(provider=req.provider, model=req.model)
         scored: list[ScoredResult] = []
 
+        with _jobs_lock:
+            cancel_event: threading.Event = _jobs[run_id]["_cancel"]
+
         judge = None
         if req.use_judge and req.judge_model and not req.dry_run:
             from evaluators.llm_judge import LLMJudge
@@ -806,6 +1006,8 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
             )
 
         for i, (task, source_file) in enumerate(tasks_with_src):
+            if cancel_event.is_set():
+                break
             result = run_task(task, config, dry_run=req.dry_run)
             scores = compute_scores(result, task)
             if judge is not None:
@@ -832,7 +1034,7 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
             _set_job(run_id, progress=i + 1)
 
         with _store() as s:
-            s.save_batch(scored, run_id=run_id)
+            row_ids = s.save_batch(scored, run_id=run_id)
             if req.notes:
                 s._conn.execute(
                     "UPDATE run_batches SET notes = ? WHERE run_id = ?",
@@ -840,7 +1042,40 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
                 )
                 s._conn.commit()
 
-        _set_job(run_id, state="done", finished_at=datetime.now(tz=timezone.utc).isoformat())
+            # Persist inline judge scores as a judge session so they appear
+            # in judge history alongside any retroactive sessions.
+            if judge is not None and not cancel_event.is_set():
+                jrun_id = str(uuid.uuid4())
+                now_iso = datetime.now(tz=timezone.utc).isoformat()
+                s.create_judge_run(
+                    judge_run_id=jrun_id,
+                    run_id=run_id,
+                    judge_model=req.judge_model,
+                    judge_provider=req.judge_provider,
+                    mitigate_position_bias=req.mitigate_position_bias,
+                    created_at=now_iso,
+                    source="benchmark",
+                )
+                for sr, row_id in zip(scored, row_ids):
+                    if row_id > 0 and sr.scores.llm_judge_score is not None:
+                        dims = {
+                            k.replace("judge_", ""): v
+                            for k, v in sr.scores.extra.items()
+                            if k.startswith("judge_")
+                        }
+                        s.save_judge_result(
+                            judge_run_id=jrun_id,
+                            result_id=row_id,
+                            task_id=sr.result.task_id,
+                            llm_judge_score=sr.scores.llm_judge_score,
+                            judge_reasoning=sr.scores.judge_reasoning,
+                            rubric_overridden=bool(sr.scores.rubric_overridden),
+                            dimensions=dims,
+                        )
+                s.finish_judge_run(jrun_id, state="done")
+
+        if not cancel_event.is_set():
+            _set_job(run_id, state="done", finished_at=datetime.now(tz=timezone.utc).isoformat())
 
     except Exception as exc:
         _set_job(run_id, state="error", error=str(exc),

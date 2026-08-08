@@ -84,6 +84,38 @@ CREATE INDEX IF NOT EXISTS idx_rr_run_id        ON run_results (run_id);
 CREATE INDEX IF NOT EXISTS idx_rr_timestamp     ON run_results (timestamp);
 """
 
+_JUDGE_DDL = """
+CREATE TABLE IF NOT EXISTS judge_runs (
+    judge_run_id           TEXT PRIMARY KEY,
+    run_id                 TEXT NOT NULL REFERENCES run_batches(run_id) ON DELETE CASCADE,
+    judge_provider         TEXT,
+    judge_model            TEXT NOT NULL,
+    rubric_override        TEXT,
+    mitigate_position_bias INTEGER NOT NULL DEFAULT 0,
+    task_count             INTEGER NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL,
+    finished_at            TEXT,
+    state                  TEXT NOT NULL DEFAULT 'running',
+    error                  TEXT,
+    source                 TEXT NOT NULL DEFAULT 'retroactive'
+);
+
+CREATE TABLE IF NOT EXISTS judge_results (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    judge_run_id      TEXT NOT NULL REFERENCES judge_runs(judge_run_id) ON DELETE CASCADE,
+    result_id         INTEGER NOT NULL REFERENCES run_results(id),
+    task_id           TEXT NOT NULL,
+    llm_judge_score   REAL,
+    judge_reasoning   TEXT,
+    rubric_overridden INTEGER NOT NULL DEFAULT 0,
+    scores_json       TEXT,
+    created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_jr_run_id      ON judge_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_jres_judge_run ON judge_results(judge_run_id);
+"""
+
 
 # ---------------------------------------------------------------------------
 # ResultsStore
@@ -95,6 +127,7 @@ class ResultsStore:
         self._conn = sqlite3.connect(str(self._path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_DDL)
+        self._conn.executescript(_JUDGE_DDL)
         self._migrate()
         self._conn.commit()
 
@@ -108,6 +141,17 @@ class ResultsStore:
             )
         if "task_input" not in existing:
             self._conn.execute("ALTER TABLE run_results ADD COLUMN task_input TEXT")
+
+        jr_existing = {row[1] for row in self._conn.execute("PRAGMA table_info(judge_runs)")}
+        if "source" not in jr_existing:
+            self._conn.execute(
+                "ALTER TABLE judge_runs ADD COLUMN source TEXT NOT NULL DEFAULT 'retroactive'"
+            )
+            # Fix pre-existing backfill entries that were created without the source column.
+            self._conn.execute(
+                "UPDATE judge_runs SET source = 'backfill'"
+                " WHERE judge_model = 'inline (pre-history)' AND source = 'retroactive'"
+            )
 
     # -----------------------------------------------------------------------
     # Write
@@ -394,6 +438,130 @@ class ResultsStore:
             ORDER BY rb.created_at DESC
         """).fetchall()
         return [dict(r) for r in rows]
+
+    # -----------------------------------------------------------------------
+    # Judge runs
+    # -----------------------------------------------------------------------
+
+    def create_judge_run(
+        self,
+        judge_run_id: str,
+        run_id: str,
+        judge_model: str,
+        judge_provider: str | None = None,
+        rubric_override: str | None = None,
+        mitigate_position_bias: bool = False,
+        created_at: str | None = None,
+        source: str = "retroactive",
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO judge_runs
+               (judge_run_id, run_id, judge_model, judge_provider,
+                rubric_override, mitigate_position_bias, created_at, state, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)""",
+            (
+                judge_run_id, run_id, judge_model, judge_provider,
+                rubric_override, int(mitigate_position_bias),
+                created_at or datetime.now(tz=timezone.utc).isoformat(),
+                source,
+            ),
+        )
+        self._conn.commit()
+
+    def save_judge_result(
+        self,
+        judge_run_id: str,
+        result_id: int,
+        task_id: str,
+        llm_judge_score: float | None,
+        judge_reasoning: str | None,
+        rubric_overridden: bool,
+        dimensions: dict[str, float],
+    ) -> None:
+        self._conn.execute(
+            """INSERT INTO judge_results
+               (judge_run_id, result_id, task_id, llm_judge_score,
+                judge_reasoning, rubric_overridden, scores_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                judge_run_id, result_id, task_id, llm_judge_score,
+                judge_reasoning, int(rubric_overridden),
+                json.dumps({f"judge_{k}": v for k, v in dimensions.items()}),
+            ),
+        )
+        self._conn.execute(
+            "UPDATE judge_runs SET task_count = task_count + 1 WHERE judge_run_id = ?",
+            (judge_run_id,),
+        )
+        self._conn.commit()
+
+    def finish_judge_run(
+        self,
+        judge_run_id: str,
+        state: str,
+        error: str | None = None,
+    ) -> None:
+        self._conn.execute(
+            """UPDATE judge_runs
+               SET state = ?, finished_at = ?, error = ?
+               WHERE judge_run_id = ?""",
+            (state, datetime.now(tz=timezone.utc).isoformat(), error, judge_run_id),
+        )
+        self._conn.commit()
+
+    def list_judge_runs(self, run_id: str | None = None) -> list[dict]:
+        q = """
+            SELECT jr.*, rb.provider, rb.model AS bench_model
+            FROM judge_runs jr
+            JOIN run_batches rb ON jr.run_id = rb.run_id
+        """
+        params: list = []
+        if run_id:
+            q += " WHERE jr.run_id = ?"
+            params.append(run_id)
+        q += " ORDER BY jr.created_at DESC"
+        return [dict(r) for r in self._conn.execute(q, params).fetchall()]
+
+    def get_judge_run(self, judge_run_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM judge_runs WHERE judge_run_id = ?", (judge_run_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_judge_run_results(self, judge_run_id: str) -> list[dict]:
+        rows = self._conn.execute(
+            """SELECT jr.*, rr.task_type, rr.difficulty, rr.domain,
+                      rr.task_input, rr.expected, rr.parsed_output, rr.parse_error
+               FROM judge_results jr
+               JOIN run_results rr ON jr.result_id = rr.id
+               WHERE jr.judge_run_id = ?
+               ORDER BY jr.llm_judge_score DESC NULLS LAST""",
+            (judge_run_id,),
+        ).fetchall()
+        results = []
+        for row in rows:
+            d = dict(row)
+            if d.get("scores_json"):
+                try:
+                    d["judge_dimensions"] = json.loads(d["scores_json"])
+                except Exception:
+                    pass
+            results.append(d)
+        return results
+
+    def get_run_results_for_judging(self, run_id: str) -> list[dict]:
+        """Return rows needed to reconstruct RunResult objects for the judge."""
+        return [
+            dict(r) for r in self._conn.execute(
+                """SELECT id, task_id, task_type, provider, model,
+                          temperature, max_tokens, top_p, seed,
+                          parsed_output, raw_output, parse_error,
+                          latency_ms, prompt_tokens, completion_tokens, total_tokens
+                   FROM run_results
+                   WHERE run_id = ? AND dry_run = 0""",
+                (run_id,),
+            ).fetchall()
+        ]
 
     def delete_run(self, run_id: str) -> int:
         """Delete a run and all its results. Returns the number of result rows deleted."""
