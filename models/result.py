@@ -59,6 +59,8 @@ class Scores(BaseModel):
     bert_score: float | None = None
     exact_match: float | None = None
     token_f1: float | None = None
+    entity_precision: float | None = None
+    entity_recall: float | None = None
     llm_judge_score: float | None = None
     rubric_overridden: bool = False
     judge_reasoning: str | None = None

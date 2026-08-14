@@ -433,6 +433,7 @@ export default function RunHistory({ includeDryRuns = false, pendingHistoryRunId
                     <col className="w-[130px]" />
                     <col className="w-[90px]" />
                     <col />
+                    <col className="w-[100px]" />
                     <col className="w-[46px]" />
                     <col className="w-[80px]" />
                     <col className="w-[32px]" />
@@ -442,6 +443,7 @@ export default function RunHistory({ includeDryRuns = false, pendingHistoryRunId
                       <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Run ID</th>
                       <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Provider</th>
                       <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Model</th>
+                      <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Task Type</th>
                       <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide text-right">Tasks</th>
                       <th className="px-3 py-2.5 font-semibold text-xs uppercase tracking-wide">Created</th>
                       <th className="px-3 py-2.5 w-8" />
@@ -471,6 +473,11 @@ export default function RunHistory({ includeDryRuns = false, pendingHistoryRunId
                           </td>
                           <td className="px-3 py-3 font-medium text-gray-800 truncate">{run.provider}</td>
                           <td className="px-3 py-3 text-xs text-gray-500 font-mono truncate" title={run.model}>{run.model}</td>
+                          <td className="px-3 py-3">
+                            {run.task_type && (
+                              <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full font-medium">{run.task_type}</span>
+                            )}
+                          </td>
                           <td className="px-3 py-3 text-gray-700 text-right tabular-nums">{run.task_count}</td>
                           <td className="px-3 py-3 text-gray-500">
                             <div className="text-xs whitespace-nowrap">{new Date(run.created_at).toLocaleDateString()}</div>

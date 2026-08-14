@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
@@ -11,15 +11,26 @@ const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899'
 
 const DIFFICULTIES = ['easy', 'medium', 'hard']
 
+const ALL_METRICS = [
+  { value: 'avg_score',            label: 'Auto (first available)' },
+  { value: 'avg_rouge_l',          label: 'ROUGE-L' },
+  { value: 'avg_token_f1',         label: 'Token F1' },
+  { value: 'avg_bert_score',       label: 'BERTScore' },
+  { value: 'avg_exact_match',      label: 'Exact Match / Entity F1' },
+  { value: 'avg_entity_precision', label: 'Entity Precision' },
+  { value: 'avg_entity_recall',    label: 'Entity Recall' },
+  { value: 'avg_llm_judge',        label: 'LLM Judge' },
+]
+
 function scoreToColor(score) {
   if (score == null) return { bg: '#f3f4f6', text: '#9ca3af' }
   // 0 → red (0°), 0.5 → yellow (60°), 1 → green (120°)
   const hue = Math.round(score * 120)
-  const lightness = 38 + (1 - score) * 12  // slightly lighter for low scores
+  const lightness = 38 + (1 - score) * 12
   return { bg: `hsl(${hue}, 62%, ${lightness}%)`, text: '#ffffff' }
 }
 
-function HeatmapGrid({ data, taskType }) {
+function HeatmapGrid({ data, taskType, metricKey }) {
   const rows = useMemo(() => {
     const filtered = data.filter(r => r.task_type === taskType)
     const providers = [...new Set(filtered.map(r => `${r.provider} / ${r.model}`))]
@@ -28,12 +39,12 @@ function HeatmapGrid({ data, taskType }) {
       const row = { provider, model, pk }
       DIFFICULTIES.forEach(d => {
         const match = filtered.find(r => r.provider === provider && r.model === model && r.difficulty === d)
-        row[d] = match ? match.avg_score : null
+        row[d] = match ? match[metricKey] : null
         row[`${d}_n`] = match ? match.n : 0
       })
       return row
     })
-  }, [data, taskType])
+  }, [data, taskType, metricKey])
 
   if (!rows.length) return <EmptyState message={`No data for ${taskType}.`} />
 
@@ -81,7 +92,7 @@ function HeatmapGrid({ data, taskType }) {
   )
 }
 
-function DifficultyDegradation({ data, taskType }) {
+function DifficultyDegradation({ data, taskType, metricKey }) {
   const { chartData, providerKeys, providerColors } = useMemo(() => {
     const filtered = data.filter(r => !taskType || r.task_type === taskType)
     const allProviderKeys = [...new Set(filtered.map(r => `${r.provider} / ${r.model}`))].sort()
@@ -91,9 +102,10 @@ function DifficultyDegradation({ data, taskType }) {
     filtered.forEach(row => {
       const pk = `${row.provider} / ${row.model}`
       if (pivot[row.difficulty]) {
+        const val = row[metricKey]
         const existing = pivot[row.difficulty][pk]
-        if (existing == null || row.avg_score > existing) {
-          pivot[row.difficulty][pk] = row.avg_score
+        if (val != null && (existing == null || val > existing)) {
+          pivot[row.difficulty][pk] = val
         }
       }
     })
@@ -103,7 +115,7 @@ function DifficultyDegradation({ data, taskType }) {
       providerKeys: allProviderKeys,
       providerColors,
     }
-  }, [data, taskType])
+  }, [data, taskType, metricKey])
 
   if (!providerKeys.length) return null
 
@@ -122,7 +134,7 @@ function DifficultyDegradation({ data, taskType }) {
             contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb', fontSize: 13 }}
           />
           <Legend />
-          {providerKeys.map((pk, i) => (
+          {providerKeys.map((pk) => (
             <Line
               key={pk}
               type="monotone"
@@ -146,11 +158,28 @@ function DifficultyDegradation({ data, taskType }) {
 export default function Heatmap({ includeDryRuns = false }) {
   const { data, loading, error } = useApi(() => api.heatmap(includeDryRuns), [includeDryRuns])
   const [taskType, setTaskType] = useState('')
+  const [metric, setMetric] = useState('avg_score')
 
   const taskTypes = useMemo(() => {
     if (!data?.length) return []
     return [...new Set(data.map(r => r.task_type))].sort()
   }, [data])
+
+  // Only show metrics that have at least one non-null value for the selected task type
+  const availableMetrics = useMemo(() => {
+    if (!data?.length) return ALL_METRICS
+    const scoped = taskType ? data.filter(r => r.task_type === taskType) : data
+    return ALL_METRICS.filter(m =>
+      m.value === 'avg_score' || scoped.some(r => r[m.value] != null)
+    )
+  }, [data, taskType])
+
+  // Reset metric to default when the selected task type no longer supports it
+  useEffect(() => {
+    if (!availableMetrics.find(m => m.value === metric)) {
+      setMetric('avg_score')
+    }
+  }, [availableMetrics, metric])
 
   if (loading) return <Spinner />
   if (error)   return <ErrorCard message={error} />
@@ -161,22 +190,27 @@ export default function Heatmap({ includeDryRuns = false }) {
   return (
     <div className="space-y-6">
       <div className="flex items-start justify-between flex-wrap gap-4">
-        <div>
-          <SectionHeader>Performance Heatmap — Provider × Difficulty</SectionHeader>
-          <p className="text-sm text-gray-500 -mt-3">
-            Score = first available metric: ROUGE-L → BERTScore → Exact Match → LLM Judge
-          </p>
-        </div>
-        <div className="w-52">
-          <Select
-            label="Task Type"
-            value={taskType}
-            onChange={setTaskType}
-            options={[
-              { value: '', label: 'All task types' },
-              ...taskTypes.map(t => ({ value: t, label: t.charAt(0).toUpperCase() + t.slice(1) })),
-            ]}
-          />
+        <SectionHeader>Performance Heatmap - Provider × Difficulty</SectionHeader>
+        <div className="flex items-end gap-3">
+          <div className="w-48">
+            <Select
+              label="Task Type"
+              value={taskType}
+              onChange={setTaskType}
+              options={[
+                { value: '', label: 'All task types' },
+                ...taskTypes.map(t => ({ value: t, label: t.charAt(0).toUpperCase() + t.slice(1) })),
+              ]}
+            />
+          </div>
+          <div className="w-52">
+            <Select
+              label="Metric"
+              value={metric}
+              onChange={setMetric}
+              options={availableMetrics}
+            />
+          </div>
         </div>
       </div>
 
@@ -198,11 +232,11 @@ export default function Heatmap({ includeDryRuns = false }) {
           {!taskType && (
             <h3 className="text-sm font-semibold text-gray-700 capitalize mb-4">{t}</h3>
           )}
-          <HeatmapGrid data={data} taskType={t} />
+          <HeatmapGrid data={data} taskType={t} metricKey={metric} />
         </div>
       ))}
 
-      <DifficultyDegradation data={data} taskType={taskType} />
+      <DifficultyDegradation data={data} taskType={taskType} metricKey={metric} />
     </div>
   )
 }

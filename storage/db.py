@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS run_results (
     bert_score         REAL,
     exact_match        REAL,
     token_f1           REAL,
+    entity_precision   REAL,
+    entity_recall      REAL,
     llm_judge_score    REAL,
     rubric_overridden  INTEGER NOT NULL DEFAULT 0,
     scores_json        TEXT,
@@ -141,6 +143,10 @@ class ResultsStore:
             )
         if "task_input" not in existing:
             self._conn.execute("ALTER TABLE run_results ADD COLUMN task_input TEXT")
+        if "entity_precision" not in existing:
+            self._conn.execute("ALTER TABLE run_results ADD COLUMN entity_precision REAL")
+        if "entity_recall" not in existing:
+            self._conn.execute("ALTER TABLE run_results ADD COLUMN entity_recall REAL")
 
         jr_existing = {row[1] for row in self._conn.execute("PRAGMA table_info(judge_runs)")}
         if "source" not in jr_existing:
@@ -194,6 +200,8 @@ class ResultsStore:
             "bert_score":         s.bert_score,
             "exact_match":        s.exact_match,
             "token_f1":           s.token_f1,
+            "entity_precision":   s.entity_precision,
+            "entity_recall":      s.entity_recall,
             "llm_judge_score":    s.llm_judge_score,
             "rubric_overridden":  int(s.rubric_overridden),
             "scores_json":        json.dumps(
@@ -239,6 +247,8 @@ class ResultsStore:
             "bert_score":      scores.bert_score,
             "exact_match":     scores.exact_match,
             "token_f1":        scores.token_f1,
+            "entity_precision": scores.entity_precision,
+            "entity_recall":    scores.entity_recall,
             "llm_judge_score":   scores.llm_judge_score,
             "rubric_overridden": int(scores.rubric_overridden),
             "scores_json":       json.dumps(
@@ -329,8 +339,8 @@ class ResultsStore:
                 SQRT(MAX(0, AVG(exact_match * exact_match) - AVG(exact_match) * AVG(exact_match))) AS std_exact_match,
                 SQRT(MAX(0, AVG(token_f1 * token_f1)     - AVG(token_f1) * AVG(token_f1)))         AS std_token_f1,
                 COUNT(CASE WHEN parse_error IS NOT NULL THEN 1 END) * 100.0 / COUNT(*) AS parse_failure_pct,
-                AVG(json_extract(scores_json, '$.entity_precision')) AS avg_entity_precision,
-                AVG(json_extract(scores_json, '$.entity_recall'))    AS avg_entity_recall,
+                AVG(entity_precision)       AS avg_entity_precision,
+                AVG(entity_recall)          AS avg_entity_recall,
                 SUM(total_tokens)           AS total_tokens,
                 SUM(estimated_cost_usd)     AS total_cost_usd,
                 AVG(latency_ms)             AS avg_latency_ms
@@ -369,9 +379,14 @@ class ResultsStore:
             SELECT
                 provider, model, task_type, difficulty,
                 COUNT(*) AS n,
-                AVG(
-                    COALESCE(rouge_l, token_f1, exact_match, bert_score, llm_judge_score)
-                ) AS avg_score
+                AVG(COALESCE(rouge_l, exact_match, bert_score, llm_judge_score)) AS avg_score,
+                AVG(rouge_l)          AS avg_rouge_l,
+                AVG(token_f1)         AS avg_token_f1,
+                AVG(bert_score)       AS avg_bert_score,
+                AVG(exact_match)      AS avg_exact_match,
+                AVG(llm_judge_score)  AS avg_llm_judge,
+                AVG(entity_precision) AS avg_entity_precision,
+                AVG(entity_recall)    AS avg_entity_recall
             FROM run_results
             {where}
             GROUP BY provider, model, task_type, difficulty
@@ -431,7 +446,8 @@ class ResultsStore:
         rows = self._conn.execute("""
             SELECT
                 rb.*,
-                COALESCE(MAX(rr.dry_run), 0) AS is_dry_run
+                COALESCE(MAX(rr.dry_run), 0) AS is_dry_run,
+                MAX(rr.task_type)             AS task_type
             FROM run_batches rb
             LEFT JOIN run_results rr ON rb.run_id = rr.run_id
             GROUP BY rb.run_id
