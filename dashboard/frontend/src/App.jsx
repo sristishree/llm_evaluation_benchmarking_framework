@@ -5,15 +5,15 @@ import RunHistory from './components/RunHistory'
 import ScoreBreakdown from './components/ScoreBreakdown'
 import Heatmap from './components/Heatmap'
 import DomainBreakdown from './components/DomainBreakdown'
-import ResponseViewer from './components/ResponseViewer'
+import LLMJudge from './components/LLMJudge'
 
 const TABS = [
   { id: 'run',      label: 'Run Benchmark',   icon: '▶',  component: RunBenchmark },
   { id: 'history',  label: 'Run History',     icon: '📋', component: RunHistory },
+  { id: 'judge',    label: 'LLM Judge',       icon: '⚖️',  component: LLMJudge },
   { id: 'scores',   label: 'Score Breakdown', icon: '📈', component: ScoreBreakdown },
   { id: 'heatmap',  label: 'Heatmap',         icon: '🔥', component: Heatmap },
   { id: 'domain',   label: 'Domain Analysis', icon: '🌐', component: DomainBreakdown },
-  { id: 'viewer',   label: 'Response Viewer', icon: '🔍', component: ResponseViewer },
 ]
 
 const DRY_RUN_TABS = new Set(['history', 'scores', 'heatmap', 'domain'])
@@ -24,14 +24,16 @@ function RunToast({ status, onDismiss, onViewHistory }) {
   if (!status) return null
 
   const { state, progress = 0, total = 0, error } = status
-  const pct      = total > 0 ? Math.round((progress / total) * 100) : 0
-  const isRunning = state === 'running' || state === 'loading'
-  const isDone    = state === 'done'
-  const isError   = state === 'error'
+  const pct        = total > 0 ? Math.round((progress / total) * 100) : 0
+  const isRunning   = state === 'running' || state === 'loading'
+  const isDone      = state === 'done'
+  const isError     = state === 'error'
+  const isCancelled = state === 'cancelled'
 
-  const border = isDone  ? 'bg-green-50 border-green-200'
-               : isError ? 'bg-red-50 border-red-200'
-               :            'bg-white border-gray-200'
+  const border = isDone      ? 'bg-green-50 border-green-200'
+               : isError     ? 'bg-red-50 border-red-200'
+               : isCancelled ? 'bg-amber-50 border-amber-200'
+               :                'bg-white border-gray-200'
 
   return (
     <div className={`fixed bottom-6 right-6 z-50 w-80 rounded-xl border shadow-xl p-4 space-y-2.5 ${border}`}>
@@ -41,12 +43,13 @@ function RunToast({ status, onDismiss, onViewHistory }) {
             <span className="shrink-0 inline-block w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
           )}
           <span className="text-sm font-semibold text-gray-800 truncate">
-            {isDone  ? '✅ Benchmark complete!'
-           : isError ? '❌ Run failed'
-           :            'Benchmark running…'}
+            {isDone      ? '✅ Benchmark complete!'
+           : isError    ? '❌ Run failed'
+           : isCancelled ? '⚠️ Run cancelled'
+           :                'Benchmark running…'}
           </span>
         </div>
-        {(isDone || isError) && (
+        {(isDone || isError || isCancelled) && (
           <button
             onClick={onDismiss}
             className="shrink-0 text-gray-400 hover:text-gray-600 text-xl leading-none"
@@ -102,7 +105,14 @@ export default function App() {
 
   // Run state lives here so it survives tab navigation
   const [activeRunId, setActiveRunId]       = useState(null)
-  const [runStatus, setRunStatus]           = useRunStatus(activeRunId)
+  const [runStatus, setRunStatus, cancelRun] = useRunStatus(activeRunId)
+
+  // Cross-tab navigation: jump to a specific run in Run History
+  const [pendingHistoryRunId, setPendingHistoryRunId] = useState(null)
+  function navigateToRun(runId) {
+    setPendingHistoryRunId(runId)
+    setActive('history')
+  }
 
 const { component: ActiveView } = TABS.find(t => t.id === active)
   const showToast = activeRunId !== null && active !== 'run'
@@ -152,7 +162,7 @@ const { component: ActiveView } = TABS.find(t => t.id === active)
       </nav>
 
       {/* Content */}
-      <main className="px-8 py-8 max-w-screen-xl mx-auto">
+      <main className={(active === 'history' || active === 'judge') ? 'px-3 py-3' : 'px-8 py-8 max-w-screen-xl mx-auto'}>
         {/* Dry-run filter bar — only on tabs where it's relevant */}
         {DRY_RUN_TABS.has(active) && (
           <div className="mb-6 flex justify-end">
@@ -173,6 +183,10 @@ const { component: ActiveView } = TABS.find(t => t.id === active)
           activeRunId={activeRunId}
           setActiveRunId={setActiveRunId}
           runStatus={runStatus}
+          cancelRun={cancelRun}
+          navigateToRun={navigateToRun}
+          pendingHistoryRunId={pendingHistoryRunId}
+          clearPendingHistoryRunId={() => setPendingHistoryRunId(null)}
         />
       </main>
 

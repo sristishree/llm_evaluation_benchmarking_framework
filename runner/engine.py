@@ -81,7 +81,7 @@ def _make_client(config: ProviderConfig) -> LLMClient:
     return LLMClient(
         provider=config.provider,
         model=config.model,
-        api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+        api_base=os.environ.get("LITELLM_BASE_URL"),
         api_key=os.environ.get("LITELLM_API_KEY"),
         temperature=config.temperature,
         max_tokens=config.max_tokens,

@@ -38,6 +38,13 @@ openai:
   available_models:
     - id: azure/gpt-4o-prod
       display_name: "GPT-4o"
+    - id: openrouter/openai/gpt-4o
+      display_name: "OPENROUTER GPT-4o"
+    - id: openrouter/openai/gpt-4o-mini
+      display_name: "OPENROUTER GPT-4o-mini"
+    - id: openrouter/openai/gpt-4-turbo
+      display_name: "OPENROUTER GPT-4-turbo"
+    
   defaults:
     temperature: 0.0
     max_tokens: 1024
@@ -56,6 +63,8 @@ google:
       display_name: "Gemini 2.5 Pro"
     - id: gemini-3.5-flash
       display_name: "Gemini 3.5 Flash"
+    - id: "openrouter/google/gemini-2.5-pro"
+      display_name: OPENROUTER Gemini 2.5 Pro
   defaults:
     temperature: 0.0
     max_tokens: 1024

@@ -223,3 +223,6 @@ __marimo__/
 # Node.js
 node_modules/
 launch.json
+
+# LiteLLM proxy config (contains real API keys — keep local only)
+litellm_config.yaml

@@ -54,7 +54,12 @@ def _score_summarization(pred: str, gold: str) -> Scores:
 
 
 def _score_extraction(pred: list[dict], gold: list[dict]) -> Scores:
-    """Entity-level F1 (exact text+label match) stored as exact_match; token F1 over entity spans."""
+    """Entity-level precision, recall, and F1 on exact (text, label) pair matches.
+
+    exact_match holds entity F1 (consistent with the DB column used by all aggregates).
+    token_f1 is intentionally omitted — concatenated-span token overlap is label-blind
+    and span-boundary-blind, making it misleading for entity detection tasks.
+    """
     if not isinstance(pred, list):
         pred = []
 
@@ -80,14 +85,10 @@ def _score_extraction(pred: list[dict], gold: list[dict]) -> Scores:
         else 0.0
     )
 
-    pred_tokens = Counter(_tokenize(" ".join(e.get("text", "") for e in pred)))
-    gold_tokens = Counter(_tokenize(" ".join(e.get("text", "") for e in gold)))
-    token_f1 = _counter_f1(pred_tokens, gold_tokens)
-
     return Scores(
         exact_match=entity_f1,
-        token_f1=token_f1,
-        extra={"entity_precision": round(precision, 6), "entity_recall": round(recall, 6)},
+        entity_precision=round(precision, 6),
+        entity_recall=round(recall, 6),
     )
 
 

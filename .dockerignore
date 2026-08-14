@@ -1,0 +1,12 @@
+.env
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+results.db
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+*.jsonl

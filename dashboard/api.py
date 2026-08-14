@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import sys
 import threading
@@ -35,7 +36,42 @@ logging.basicConfig(
 logging.getLogger("evaluators").setLevel(logging.DEBUG)
 logging.getLogger("storage").setLevel(logging.DEBUG)
 
-app = FastAPI(title="LLM Evaluation Benchmark API", version="0.1.0")
+_TAGS_METADATA = [
+    {
+        "name": "configuration",
+        "description": "Provider catalog, dataset task-bank metadata, and rubric defaults.",
+    },
+    {
+        "name": "runs",
+        "description": "Start, monitor, retrieve, and delete benchmark runs.",
+    },
+    {
+        "name": "scores",
+        "description": "Aggregated score analytics powering charts and comparisons.",
+    },
+    {
+        "name": "results",
+        "description": "Row-level generation results with full metric detail.",
+    },
+    {
+        "name": "judge",
+        "description": "LLM-as-a-judge prompt preview and calibration against human scores.",
+    },
+]
+
+app = FastAPI(
+    title="LLM Evaluation Benchmark API",
+    version="1.0.0",
+    description=(
+        "REST API for the LLM Evaluation Framework. "
+        "Run benchmarks across providers and models, retrieve aggregated scores, "
+        "and calibrate an LLM-as-a-judge against human ratings.\n\n"
+        "**Interactive docs:** `/docs` (Swagger UI) · `/redoc` (ReDoc)"
+    ),
+    openapi_tags=_TAGS_METADATA,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,7 +80,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_DB_PATH   = Path(__file__).parent.parent / "results.db"
+_DB_PATH   = Path(os.environ.get("DATA_DIR", str(Path(__file__).parent.parent))) / "results.db"
 _TASK_BANK = Path(__file__).parent.parent / "task_bank"
 _CONFIG    = Path(__file__).parent.parent / "config" / "providers.yaml"
 
@@ -106,8 +142,14 @@ def _store() -> ResultsStore:
 # Provider catalog
 # ---------------------------------------------------------------------------
 
-@app.get("/api/catalog")
+@app.get(
+    "/api/catalog",
+    tags=["configuration"],
+    summary="List available providers and models",
+    response_description="Parsed contents of providers.yaml — provider names mapped to their model lists.",
+)
 def get_catalog() -> dict[str, Any]:
+    """Return the full provider/model catalog loaded from `config/providers.yaml`."""
     with open(_CONFIG) as f:
         return yaml.safe_load(f)
 
@@ -116,8 +158,17 @@ def get_catalog() -> dict[str, Any]:
 # Task bank stats (powers the dataset selector panel)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/task-bank")
+@app.get(
+    "/api/task-bank",
+    tags=["configuration"],
+    summary="Dataset metadata and difficulty statistics",
+    response_description="Map of task_type → list of dataset entries with total count and easy/medium/hard breakdown.",
+)
 def task_bank_stats(refresh: bool = False) -> dict[str, Any]:
+    """Return metadata for every JSONL dataset in the task bank.
+
+    Results are cached in memory; pass `refresh=true` to force a re-scan.
+    """
     global _task_bank_cache
     with _task_bank_lock:
         if _task_bank_cache is not None and not refresh:
@@ -178,7 +229,12 @@ def _build_task_bank_stats() -> dict[str, Any]:
 # Default rubric for a task type (powers the rubric preview in the UI)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/rubric")
+@app.get(
+    "/api/rubric",
+    tags=["configuration"],
+    summary="Get default rubric for a dataset or task type",
+    response_description="Rubric string, task_type, and the resolved dataset_file.",
+)
 def get_default_rubric(
     dataset_file: str | None = Query(None),
     task_type:    str | None = Query(None),
@@ -239,14 +295,27 @@ def get_default_rubric(
 # Run list + summary (read-only, from DB)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/runs")
+@app.get(
+    "/api/runs",
+    tags=["runs"],
+    summary="List all benchmark runs",
+    response_description="Array of run metadata records ordered by most-recent first.",
+)
 def list_runs() -> list[dict[str, Any]]:
+    """Return summary metadata for every benchmark run stored in the database."""
     with _store() as s:
         return s.list_runs()
 
 
-@app.delete("/api/runs/{run_id}", status_code=200)
+@app.delete(
+    "/api/runs/{run_id}",
+    tags=["runs"],
+    summary="Delete a run and all its results",
+    status_code=200,
+    response_description="Confirmation with count of deleted result rows.",
+)
 def delete_run(run_id: str) -> dict[str, Any]:
+    """Permanently remove a run batch and every associated result row from the database."""
     with _jobs_lock:
         _jobs.pop(run_id, None)
     with _store() as s:
@@ -254,13 +323,25 @@ def delete_run(run_id: str) -> dict[str, Any]:
     return {"run_id": run_id, "results_deleted": deleted}
 
 
-@app.get("/api/runs/{run_id}/summary")
+@app.get(
+    "/api/runs/{run_id}/summary",
+    tags=["runs"],
+    summary="Get detailed run summary",
+    response_description="Aggregated metrics and metadata for the completed run.",
+)
 def get_run_summary(run_id: str) -> dict[str, Any]:
+    """Return the full summary for a completed benchmark run by its UUID."""
     with _store() as s:
         return s.get_run_summary(run_id)
 
 
-@app.get("/api/runs/{run_id}")
+@app.get(
+    "/api/runs/{run_id}",
+    tags=["runs"],
+    summary="Get run summary (compatibility alias)",
+    response_description="Same response as /api/runs/{run_id}/summary.",
+    include_in_schema=False,
+)
 def get_run_summary_compat(run_id: str) -> dict[str, Any]:
     with _store() as s:
         return s.get_run_summary(run_id)
@@ -292,8 +373,20 @@ class RunRequest(BaseModel):
     rubric_overrides:      dict[str, str] = {}
 
 
-@app.post("/api/runs", status_code=202)
+@app.post(
+    "/api/runs",
+    tags=["runs"],
+    summary="Start a benchmark run",
+    status_code=202,
+    response_description="Accepted — returns run_id immediately; poll /api/runs/{run_id}/status for progress.",
+)
 def start_run(req: RunRequest) -> dict[str, Any]:
+    """Launch an async benchmark run.
+
+    The run executes in a background thread. The response (HTTP 202) returns immediately
+    with a `run_id`. Poll `GET /api/runs/{run_id}/status` to track progress.
+    When `state` becomes `"done"`, results are available via `/api/results?run_id=…`.
+    """
     if not req.datasets:
         raise HTTPException(status_code=422, detail="Select at least one dataset.")
     run_id = str(uuid.uuid4())
@@ -306,17 +399,27 @@ def start_run(req: RunRequest) -> dict[str, Any]:
             "error":       None,
             "started_at":  datetime.now(tz=timezone.utc).isoformat(),
             "finished_at": None,
+            "_cancel":     threading.Event(),
         }
     threading.Thread(target=_execute_run, args=(run_id, req), daemon=True).start()
     return {"run_id": run_id}
 
 
-@app.get("/api/runs/{run_id}/status")
+@app.get(
+    "/api/runs/{run_id}/status",
+    tags=["runs"],
+    summary="Poll run progress",
+    response_description="Job state object with `state` (loading | running | done | error), progress counters, and timestamps.",
+)
 def run_status(run_id: str) -> dict[str, Any]:
+    """Return live progress for an in-flight run, or the completed summary for a finished one.
+
+    `state` values: `loading` → `running` → `done` | `error` | `cancelled`.
+    """
     with _jobs_lock:
         job = _jobs.get(run_id)
     if job:
-        return job
+        return _public_job(job)
     with _store() as s:
         summary = s.get_run_summary(run_id)
     if summary:
@@ -324,37 +427,87 @@ def run_status(run_id: str) -> dict[str, Any]:
     raise HTTPException(status_code=404, detail="Run not found")
 
 
+@app.post(
+    "/api/runs/{run_id}/cancel",
+    tags=["runs"],
+    summary="Cancel a running benchmark",
+    status_code=200,
+)
+def cancel_run(run_id: str) -> dict[str, Any]:
+    """Signal a running benchmark to stop after the current task completes."""
+    with _jobs_lock:
+        job = _jobs.get(run_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Run not found or already completed")
+    state = job.get("state")
+    if state not in ("loading", "running"):
+        raise HTTPException(status_code=409, detail=f"Run is already in state '{state}'")
+    cancel_event: threading.Event = job["_cancel"]
+    cancel_event.set()
+    _set_job(run_id, state="cancelled", finished_at=datetime.now(tz=timezone.utc).isoformat())
+    return {"run_id": run_id, "state": "cancelled"}
+
+
 # ---------------------------------------------------------------------------
 # Aggregate score endpoints (power the charts)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/scores/breakdown")
+@app.get(
+    "/api/scores/breakdown",
+    tags=["scores"],
+    summary="Score breakdown by provider and task type",
+    response_description="Aggregated mean scores grouped by provider × task_type.",
+)
 def score_breakdown(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return mean scores aggregated by provider and task type — the primary bar-chart dataset."""
     with _store() as s:
         return s.agg_by_provider_and_type(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/heatmap")
+@app.get(
+    "/api/scores/heatmap",
+    tags=["scores"],
+    summary="Provider × model score heatmap",
+    response_description="Matrix of mean scores indexed by provider and model.",
+)
 def score_heatmap(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return aggregated scores in heatmap format — one row per provider/model combination."""
     with _store() as s:
         return s.agg_heatmap(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/cost-quality")
+@app.get(
+    "/api/scores/cost-quality",
+    tags=["scores"],
+    summary="Cost vs quality comparison",
+    response_description="Per-model data points with estimated_cost_usd and composite quality score.",
+)
 def cost_vs_quality(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return cost vs quality data points for the scatter-plot view — one record per provider/model."""
     with _store() as s:
         return s.agg_cost_vs_quality(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/by-domain")
+@app.get(
+    "/api/scores/by-domain",
+    tags=["scores"],
+    summary="Score breakdown by domain",
+    response_description="Mean scores grouped by domain label.",
+)
 def score_by_domain(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
+    """Return mean scores aggregated by domain — powers the domain breakdown chart."""
     with _store() as s:
         return s.agg_by_domain(exclude_dry_runs=not include_dry_runs)
 
 
-@app.get("/api/scores/distribution")
+@app.get(
+    "/api/scores/distribution",
+    tags=["scores"],
+    summary="Individual score values for histogram charts",
+    response_description="Flat list of per-result score fields (exact_match, rouge_l, bert_score, etc.).",
+)
 def score_distribution(include_dry_runs: bool = Query(False)) -> list[dict[str, Any]]:
-    """Individual score values per result — used for histogram charts."""
+    """Return one record per result with all metric values — used to draw score-distribution histograms."""
     with _store() as s:
         rows = s.query(dry_run=False if not include_dry_runs else None)
         return [
@@ -364,12 +517,14 @@ def score_distribution(include_dry_runs: bool = Query(False)) -> list[dict[str, 
                 "task_type":   r["task_type"],
                 "difficulty":  r["difficulty"],
                 "domain":      r["domain"],
-                "exact_match": r["exact_match"],
-                "rouge_l":     r["rouge_l"],
-                "rouge_1":     r["rouge_1"],
-                "rouge_2":     r["rouge_2"],
-                "token_f1":    r["token_f1"],
-                "bert_score":  r["bert_score"],
+                "exact_match":      r["exact_match"],
+                "rouge_l":          r["rouge_l"],
+                "rouge_1":          r["rouge_1"],
+                "rouge_2":          r["rouge_2"],
+                "token_f1":         r["token_f1"],
+                "bert_score":       r["bert_score"],
+                "entity_precision": r.get("entity_precision"),
+                "entity_recall":    r.get("entity_recall"),
             }
             for r in rows
         ]
@@ -379,16 +534,26 @@ def score_distribution(include_dry_runs: bool = Query(False)) -> list[dict[str, 
 # Row-level results (powers the response viewer)
 # ---------------------------------------------------------------------------
 
-@app.get("/api/results")
+@app.get(
+    "/api/results",
+    tags=["results"],
+    summary="Query generation results with filters",
+    response_description="Up to `limit` result rows with metrics, raw outputs, and optional judge scores.",
+)
 def query_results(
-    provider:  str | None = Query(None),
-    model:     str | None = Query(None),
-    task_type: str | None = Query(None),
-    difficulty:str | None = Query(None),
-    domain:    str | None = Query(None),
-    run_id:    str | None = Query(None),
-    limit:     int        = Query(200, le=1000),
+    provider:  str | None = Query(None, description="Filter by provider name (e.g. `openai`)."),
+    model:     str | None = Query(None, description="Filter by model identifier."),
+    task_type: str | None = Query(None, description="One of: `classification`, `qa`, `summarization`, `extraction`."),
+    difficulty:str | None = Query(None, description="One of: `easy`, `medium`, `hard`."),
+    domain:    str | None = Query(None, description="Domain label stored on the task."),
+    run_id:    str | None = Query(None, description="UUID of a specific benchmark run."),
+    limit:     int        = Query(200, le=1000, description="Maximum rows to return (hard cap 1000)."),
 ) -> list[dict[str, Any]]:
+    """Query row-level results from the database with optional filters.
+
+    All filter parameters are optional and combinable.
+    LLM-judge dimension scores (if present) are surfaced as `judge_dimensions` and `judge_reasoning`.
+    """
     with _store() as s:
         rows = s.query(
             provider=provider, model=model, task_type=task_type,
@@ -417,6 +582,176 @@ def query_results(
 
 
 # ---------------------------------------------------------------------------
+# LLM-as-Judge: retroactive judge runs (non-destructive history)
+# ---------------------------------------------------------------------------
+
+class RetroJudgeRequest(BaseModel):
+    judge_provider:        str | None = None
+    judge_model:           str
+    rubric_override:       str | None = None
+    mitigate_position_bias: bool = False
+
+
+@app.post(
+    "/api/runs/{run_id}/judge",
+    tags=["judge"],
+    summary="Start a retroactive judge run on an existing benchmark run",
+    status_code=202,
+)
+def start_retro_judge(run_id: str, req: RetroJudgeRequest) -> dict[str, Any]:
+    """Launch an async judge pass over all results in an existing benchmark run.
+
+    Results are stored in ``judge_results`` — original run_results are never mutated.
+    Poll ``GET /api/judge-runs/{judge_run_id}/status`` for progress.
+    """
+    with _store() as s:
+        rows = s.get_run_results_for_judging(run_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail="Run not found or has no scoreable results.")
+
+    judge_run_id = str(uuid.uuid4())
+    with _store() as s:
+        s.create_judge_run(
+            judge_run_id=judge_run_id,
+            run_id=run_id,
+            judge_model=req.judge_model,
+            judge_provider=req.judge_provider,
+            rubric_override=req.rubric_override,
+            mitigate_position_bias=req.mitigate_position_bias,
+            source="retroactive",
+        )
+
+    with _jobs_lock:
+        _jobs[judge_run_id] = {
+            "judge_run_id": judge_run_id,
+            "state":        "running",
+            "progress":     0,
+            "total":        len(rows),
+            "error":        None,
+        }
+
+    threading.Thread(
+        target=_execute_retro_judge,
+        args=(judge_run_id, run_id, rows, req),
+        daemon=True,
+    ).start()
+    return {"judge_run_id": judge_run_id}
+
+
+@app.get("/api/judge-runs", tags=["judge"], summary="List all judge runs")
+def list_judge_runs(run_id: str | None = Query(None)) -> list[dict[str, Any]]:
+    with _store() as s:
+        return s.list_judge_runs(run_id=run_id)
+
+
+@app.get("/api/judge-runs/{judge_run_id}/status", tags=["judge"], summary="Poll judge run progress")
+def judge_run_status(judge_run_id: str) -> dict[str, Any]:
+    with _jobs_lock:
+        job = _jobs.get(judge_run_id)
+    if job:
+        return job
+    with _store() as s:
+        run = s.get_judge_run(judge_run_id)
+    if run:
+        return {"judge_run_id": judge_run_id, "state": run["state"], **run}
+    raise HTTPException(status_code=404, detail="Judge run not found")
+
+
+@app.get("/api/judge-runs/{judge_run_id}/results", tags=["judge"], summary="Get per-task results of a judge run")
+def judge_run_results(judge_run_id: str) -> list[dict[str, Any]]:
+    with _store() as s:
+        return s.get_judge_run_results(judge_run_id)
+
+
+def _execute_retro_judge(
+    judge_run_id: str,
+    run_id: str,
+    rows: list[dict],
+    req: RetroJudgeRequest,
+) -> None:
+    import os
+    from evaluators.llm_judge import LLMJudge
+    from models.result import GenerationConfig, RunResult
+    from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
+
+    TYPE_CLS = {
+        "classification": ClassificationTask,
+        "qa":             QATask,
+        "summarization":  SummarizationTask,
+        "extraction":     ExtractionTask,
+    }
+
+    try:
+        judge = LLMJudge(
+            model=req.judge_model,
+            api_base=os.environ.get("LITELLM_BASE_URL"),
+            api_key=os.environ.get("LITELLM_API_KEY"),
+            mitigate_position_bias=req.mitigate_position_bias,
+        )
+
+        task_ids = {r["task_id"] for r in rows}
+        tasks_by_id = _find_tasks_by_ids(task_ids, TYPE_CLS)
+
+        for i, row in enumerate(rows):
+            task = tasks_by_id.get(row["task_id"])
+            if task is None and not req.rubric_override:
+                _set_job(judge_run_id, progress=i + 1)
+                continue
+
+            try:
+                parsed = json.loads(row["parsed_output"]) if row.get("parsed_output") else None
+            except Exception:
+                parsed = row.get("parsed_output")
+
+            result = RunResult(
+                task_id=row["task_id"],
+                task_type=row["task_type"],
+                provider=row["provider"],
+                model=row["model"],
+                generation_config=GenerationConfig(
+                    model=row["model"],
+                    temperature=row.get("temperature", 0.0),
+                    max_tokens=row.get("max_tokens", 1024),
+                    top_p=row.get("top_p", 1.0),
+                    seed=row.get("seed"),
+                ),
+                raw_output=row.get("raw_output") or "",
+                parsed_output=parsed,
+                parse_error=row.get("parse_error"),
+                tokens_used={
+                    "prompt":     row.get("prompt_tokens", 0),
+                    "completion": row.get("completion_tokens", 0),
+                    "total":      row.get("total_tokens", 0),
+                },
+                latency_ms=row.get("latency_ms", 0.0),
+            )
+
+            jr = judge.judge(result, task, rubric_override=req.rubric_override)
+
+            with _store() as s:
+                s.save_judge_result(
+                    judge_run_id=judge_run_id,
+                    result_id=row["id"],
+                    task_id=row["task_id"],
+                    llm_judge_score=jr.overall if jr else None,
+                    judge_reasoning=jr.reasoning if jr else None,
+                    rubric_overridden=jr.rubric_overridden if jr else False,
+                    dimensions=jr.dimensions if jr else {},
+                )
+
+            _set_job(judge_run_id, progress=i + 1)
+
+        with _store() as s:
+            s.finish_judge_run(judge_run_id, state="done")
+        _set_job(judge_run_id, state="done")
+
+    except Exception as exc:
+        with _store() as s:
+            s.finish_judge_run(judge_run_id, state="error", error=str(exc))
+        _set_job(judge_run_id, state="error", error=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # LLM-as-Judge: rubric preview
 # ---------------------------------------------------------------------------
 
@@ -426,9 +761,17 @@ class PreviewRequest(BaseModel):
     rubric_overrides: dict[str, str] = {}   # dataset_file → rubric string
 
 
-@app.post("/api/judge/preview")
+@app.post(
+    "/api/judge/preview",
+    tags=["judge"],
+    summary="Preview judge prompts (no LLM call)",
+    response_description="List of rendered judge prompts — one per sampled task across all dataset files.",
+)
 def preview_judge(req: PreviewRequest) -> list[dict[str, Any]]:
-    """Return judge prompt previews for all selected datasets without any LLM call."""
+    """Return judge prompt previews for all selected datasets without any LLM call.
+
+    Useful for inspecting and refining rubrics before spending on a full scored run.
+    """
     from evaluators.llm_judge import build_preview
     from models.task import ClassificationTask, ExtractionTask, QATask, SummarizationTask
 
@@ -487,7 +830,12 @@ class CalibrateRequest(BaseModel):
     mitigate_position_bias: bool = False
 
 
-@app.post("/api/judge/calibrate")
+@app.post(
+    "/api/judge/calibrate",
+    tags=["judge"],
+    summary="Calibrate judge against human scores",
+    response_description="CalibrationReport with Pearson r, mean bias, and per-task deltas.",
+)
 def calibrate_judge(req: CalibrateRequest) -> dict[str, Any]:
     """Compare LLM judge scores against human ratings on a small held-out slice.
 
@@ -528,7 +876,7 @@ def calibrate_judge(req: CalibrateRequest) -> dict[str, Any]:
 
         judge = LLMJudge(
             model=req.judge_model,
-            api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+            api_base=os.environ.get("LITELLM_BASE_URL"),
             api_key=os.environ.get("LITELLM_API_KEY"),
             mitigate_position_bias=req.mitigate_position_bias,
         )
@@ -622,6 +970,11 @@ def _find_tasks_by_ids(task_ids: set[str], type_cls: dict) -> dict:
 # Internal: async run execution
 # ---------------------------------------------------------------------------
 
+def _public_job(job: dict) -> dict:
+    """Return a copy of a job dict with internal (underscore-prefixed) fields stripped."""
+    return {k: v for k, v in job.items() if not k.startswith("_")}
+
+
 def _set_job(run_id: str, **kwargs: Any) -> None:
     with _jobs_lock:
         _jobs[run_id].update(kwargs)
@@ -640,18 +993,23 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
         config = ProviderConfig(provider=req.provider, model=req.model)
         scored: list[ScoredResult] = []
 
+        with _jobs_lock:
+            cancel_event: threading.Event = _jobs[run_id]["_cancel"]
+
         judge = None
         if req.use_judge and req.judge_model and not req.dry_run:
             from evaluators.llm_judge import LLMJudge
             import os
             judge = LLMJudge(
                 model=req.judge_model,
-                api_base=os.environ.get("LITELLM_BASE_URL_REMOTE"),
+                api_base=os.environ.get("LITELLM_BASE_URL"),
                 api_key=os.environ.get("LITELLM_API_KEY"),
                 mitigate_position_bias=req.mitigate_position_bias,
             )
 
         for i, (task, source_file) in enumerate(tasks_with_src):
+            if cancel_event.is_set():
+                break
             result = run_task(task, config, dry_run=req.dry_run)
             scores = compute_scores(result, task)
             if judge is not None:
@@ -671,13 +1029,14 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
                 difficulty=task.difficulty,
                 domain=task.domain,
                 expected=task.expected,
+                task_input=task.input,
                 scores=scores,
                 estimated_cost_usd=result.estimated_cost_usd,
             ))
             _set_job(run_id, progress=i + 1)
 
         with _store() as s:
-            s.save_batch(scored, run_id=run_id)
+            row_ids = s.save_batch(scored, run_id=run_id)
             if req.notes:
                 s._conn.execute(
                     "UPDATE run_batches SET notes = ? WHERE run_id = ?",
@@ -685,7 +1044,40 @@ def _execute_run(run_id: str, req: RunRequest) -> None:
                 )
                 s._conn.commit()
 
-        _set_job(run_id, state="done", finished_at=datetime.now(tz=timezone.utc).isoformat())
+            # Persist inline judge scores as a judge session so they appear
+            # in judge history alongside any retroactive sessions.
+            if judge is not None and not cancel_event.is_set():
+                jrun_id = str(uuid.uuid4())
+                now_iso = datetime.now(tz=timezone.utc).isoformat()
+                s.create_judge_run(
+                    judge_run_id=jrun_id,
+                    run_id=run_id,
+                    judge_model=req.judge_model,
+                    judge_provider=req.judge_provider,
+                    mitigate_position_bias=req.mitigate_position_bias,
+                    created_at=now_iso,
+                    source="benchmark",
+                )
+                for sr, row_id in zip(scored, row_ids):
+                    if row_id > 0 and sr.scores.llm_judge_score is not None:
+                        dims = {
+                            k.replace("judge_", ""): v
+                            for k, v in sr.scores.extra.items()
+                            if k.startswith("judge_")
+                        }
+                        s.save_judge_result(
+                            judge_run_id=jrun_id,
+                            result_id=row_id,
+                            task_id=sr.result.task_id,
+                            llm_judge_score=sr.scores.llm_judge_score,
+                            judge_reasoning=sr.scores.judge_reasoning,
+                            rubric_overridden=bool(sr.scores.rubric_overridden),
+                            dimensions=dims,
+                        )
+                s.finish_judge_run(jrun_id, state="done")
+
+        if not cancel_event.is_set():
+            _set_job(run_id, state="done", finished_at=datetime.now(tz=timezone.utc).isoformat())
 
     except Exception as exc:
         _set_job(run_id, state="error", error=str(exc),

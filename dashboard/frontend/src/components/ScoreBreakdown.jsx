@@ -518,7 +518,7 @@ function MetricCorrelationScatter({ includeDryRuns, selectedProviders, providerC
 export default function ScoreBreakdown({ includeDryRuns = false }) {
   const { data, loading, error } = useApi(() => api.breakdown(includeDryRuns), [includeDryRuns])
 
-  const [metric,        setMetric]        = useState('avg_rouge_l')
+  const [metric,        setMetric]        = useState('')
   const [scatterMetric, setScatterMetric] = useState('rouge_l')
   const [showErrorBars,     setShowErrorBars]     = useState(false)
   const [viewMode,          setViewMode]          = useState('overview')

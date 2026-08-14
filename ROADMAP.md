@@ -153,7 +153,7 @@ Use Pydantic subclasses per task type so `expected` is properly typed: `str` for
 
 ### Difficulty Design
 
-Most benchmarks fail because tasks are too easy — every provider scores 85–95% and results are flat. Deliberately include tasks that stress-test models: long inputs, domain jargon, adversarial phrasing, unanswerable questions, implicit sentiment. **Score spread is what makes the analysis worth reading.**
+Include datasets with different levels of difficulty. Deliberately include tasks that stress-test models: long inputs, domain jargon, adversarial phrasing, unanswerable questions, implicit sentiment. **Score spread is what makes the analysis worth reading.**
 
 ### Storage Format
 

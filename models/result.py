@@ -59,6 +59,8 @@ class Scores(BaseModel):
     bert_score: float | None = None
     exact_match: float | None = None
     token_f1: float | None = None
+    entity_precision: float | None = None
+    entity_recall: float | None = None
     llm_judge_score: float | None = None
     rubric_overridden: bool = False
     judge_reasoning: str | None = None
@@ -77,5 +79,6 @@ class ScoredResult(BaseModel):
     difficulty: Literal["easy", "medium", "hard"]
     domain: str
     expected: Any | None = None
+    task_input: str | None = None
     scores: Scores = Field(default_factory=Scores)
     estimated_cost_usd: float | None = None

@@ -96,7 +96,7 @@ class LLMJudge:
         self.timeout_seconds = timeout_seconds
         self.mitigate_position_bias = mitigate_position_bias
         self._client = OpenAI(
-            base_url=api_base or os.environ.get("LITELLM_BASE_URL_REMOTE"),
+            base_url=api_base or os.environ.get("LITELLM_BASE_URL"),
             api_key=api_key or os.environ.get("LITELLM_API_KEY"),
         )
 
@@ -164,7 +164,7 @@ class LLMJudge:
                 model=self.model,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=512,
+                # max_tokens=512,
                 response_format={"type": "json_object"},
                 timeout=self.timeout_seconds,
             )
